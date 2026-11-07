@@ -41,6 +41,7 @@ def main():
     from app.analyzer import GeminiAnalyzer, create_client
     from app.camera_app import CameraApp, gui_startup_error, open_camera
     from app.state import AnalysisState
+    from app.voice_listener import VoiceListener
 
     gui_error = gui_startup_error(cv2)
     if gui_error:
@@ -59,6 +60,8 @@ def main():
     state = AnalysisState()
     analyzer = GeminiAnalyzer(create_client(api_key, genai, types), Image, types, state)
     app = CameraApp(cv2, camera, camera_index, analyzer, state)
+    voice_listener = VoiceListener(app.handle_voice_command, state.set_notice)
+    app.voice_listener = voice_listener
     try:
         app.run()
     except cv2.error:

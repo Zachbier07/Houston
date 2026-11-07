@@ -50,6 +50,12 @@ class AnalysisState:
             self.message = "Search not started"
             self.error = error
 
+    def set_notice(self, message):
+        with self.lock:
+            if not self.busy:
+                self.message = message
+                self.error = ""
+
     def reset_camera(self, camera_index):
         with self.lock:
             self.request_id += 1

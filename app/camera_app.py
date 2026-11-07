@@ -52,28 +52,35 @@ class CameraApp:
 
     WINDOW = "Houston — camera object finder"
 
-    def __init__(self, cv2, camera, camera_index, analyzer, state):
+    def __init__(self, cv2, camera, camera_index, analyzer, state, voice_listener=None):
         self.cv2 = cv2
         self.camera = camera
         self.camera_index = camera_index
         self.analyzer = analyzer
         self.state = state
+        self.voice_listener = voice_listener
         self.zoom = ZOOM_MIN
         self.prompt_active = False
         self.prompt_text = ""
+        self.latest_frame = None
 
     def run(self):
+        if self.voice_listener:
+            self.voice_listener.start()
         try:
             while True:
                 ok, frame = self.camera.read()
                 if not ok:
                     continue
                 view_frame = digital_zoom(frame, self.zoom, self.cv2)
+                self.latest_frame = view_frame.copy()
                 self._show(view_frame)
                 key = self.cv2.waitKeyEx(1)
                 if not self._handle_key(key, view_frame):
                     break
         finally:
+            if self.voice_listener:
+                self.voice_listener.stop()
             self.camera.release()
             try:
                 self.cv2.destroyAllWindows()
@@ -209,3 +216,11 @@ class CameraApp:
                 self.state.reset_camera(opened_index)
                 return
             next_index = (next_index + 1) % 10
+
+    def handle_voice_command(self, target):
+        """Search the most recent camera frame when the wake phrase is heard."""
+        frame = self.latest_frame
+        if frame is None:
+            self.state.set_notice("Camera frame not ready; try the voice command again")
+            return
+        self.analyzer.start(frame.copy(), target)

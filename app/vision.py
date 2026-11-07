@@ -6,10 +6,12 @@ import re
 ZOOM_MIN = 1.0
 _OBJECT_NAME = re.compile(r"^[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+){0,7}$")
 _INSTRUCTION_WORDS = {
-    "act", "answer", "assistant", "developer", "disregard", "execute", "forget",
-    "follow", "ignore", "instruction", "instructions", "output", "pretend",
-    "prompt", "respond", "return", "roleplay", "run", "say", "show", "system",
-    "tell", "user", "write",
+    "act", "answer", "assistant", "developer", "disclose", "disregard",
+    "execute", "everything", "forget", "follow", "hidden", "ignore",
+    "instruction", "instructions", "jailbreak", "output", "override", "previous",
+    "pretend", "prompt", "repeat", "respond", "return", "reveal", "roleplay",
+    "run", "say", "secret", "secrets", "show", "system", "tell", "unrestricted",
+    "user", "verbatim", "write",
 }
 
 

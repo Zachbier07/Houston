@@ -5,7 +5,12 @@ import sys
 import threading
 import time
 
-from .vision import parse_detections, validate_object_name
+if __package__ in (None, ""):
+    # Support being invoked by file path long enough to show the right guidance.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from app.vision import parse_detections, validate_object_name
+else:
+    from .vision import parse_detections, validate_object_name
 
 
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
@@ -111,3 +116,8 @@ class GeminiAnalyzer:
             x1, y1, x2, y2 = item["box"]
             print(f"- {item['label']}: center {x * 100:.1f}% from left, "
                   f"{y * 100:.1f}% from top; box [{x1}, {y1}, {x2}, {y2}] px")
+
+
+if __name__ == "__main__":
+    print("analyzer.py is an app module, not a standalone program. "
+          "Launch the webcam app with: python main.py")
