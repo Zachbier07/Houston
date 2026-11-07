@@ -70,7 +70,6 @@ Houston has to learn how servo angles map to spots on the desk. One button on th
 - **USB webcam** mounted on a **desk lamp** looking down. It's also the microphone.
 - **USB speaker** for Houston's voice
 - **5 V 3 A adapter** that powers only the servos
-- **Light-colored desk mat** so the dot is easy to see
 - **A laptop** that runs everything else
 
 ### Safety
