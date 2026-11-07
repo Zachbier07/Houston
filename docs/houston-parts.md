@@ -101,6 +101,6 @@ Backup: if the MOSFET gives you trouble, the 2-channel relay module does the sam
 - [ ] OpenCV can turn off auto-exposure and autofocus on the webcam
 - [ ] Snap the servos back and forth and watch how long the dot takes to settle. If it bounces, lock the lamp joints and weigh down the base.
 - [ ] Lamp on, laser on: the dot still stands out. LED lamps can flicker on camera (banding). If you see it, try another brightness level.
-- [ ] The camera sees the whole working area of the table from the lamp head
-- [ ] The laser dot shows up on the bare table under bright room light. No mat: we work on whatever table we get. If the dot is faint (dark or glossy table), lower the camera's locked exposure until it stands out, and keep props off shiny spots that throw glare.
+- [ ] The camera sees the whole work area from the lamp head
+- [ ] No desk mat: the laser dot shows up on the bare table under bright room light. Test on at least 3 tables (light, dark, glossy if there is one).
 - [ ] Webcam mic hears the wake word from about 1 m with noise playing
