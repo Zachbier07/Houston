@@ -29,10 +29,12 @@ const int TILT_PIN = 7;   // laser servo
 const int LASER_PIN = 4;  // !!! CONFIRM: laser switch (2N7000 gate via 100 ohm), HIGH = on
 
 // ---- Limits ----
-// The test sketch's safe range was 45..135 degrees with Servo.write(). With the
-// Servo library's default 544..2400 us scale that is 1008..1936 us; 90 deg = 1472 us.
-const int PAN_MIN_US = 1008;
-const int PAN_MAX_US = 1936;
+// Pan widened from the test sketch's 45..135 deg to 15..165 deg so the laser can
+// reach more of the table. Servo library scale: 544..2400 us = 0..180 deg,
+// so 15..165 deg = 699..2245 us; 90 deg = 1472 us. Not the full 0..180: MG90S
+// servos can hit their end stops there and stall, which browns out the Uno.
+const int PAN_MIN_US = 699;
+const int PAN_MAX_US = 2245;
 const int CENTER_US = 1472;
 
 // !!! MEASURE THESE ON THE REAL MOUNT BEFORE TURNING THE LASER ON !!!

@@ -44,7 +44,7 @@ log = logging.getLogger("aim")
 # ============================ TUNING ============================
 # Servo limits in pulse microseconds. KEEP EQUAL to PAN_MIN/MAX_US and
 # TILT_MIN/MAX_US in firmware/src/main.cpp.
-PAN_US = (1008, 1936)
+PAN_US = (699, 2245)            # 15..165 deg
 TILT_US = (1200, 1800)
 CENTER_US = (1472, 1500)
 
