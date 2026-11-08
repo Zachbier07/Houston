@@ -64,7 +64,7 @@ US_PER_RAD = 1856 / np.pi       # Servo library: 544..2400 us = 0..180 degrees (
 # The laser can't turn off, so: park it far from the target, grab a reference
 # frame, aim, grab another, and look for the dot ONLY near the target.
 VERIFY = True
-SETTLE_S = 0.6                  # servo travel + camera delay before grabbing a frame
+SETTLE_S = 0.5                  # servo travel + camera delay before grabbing a frame
 SEARCH_RADIUS_PX = 70           # look for the dot this far around the target
 PARK_MIN_DIST_PX = 250          # the parked dot must be at least this far from the target
 DOT_MIN_JUMP = 45               # summed B+G+R brightness jump the dot must make
@@ -453,6 +453,13 @@ class Aimer:
     def _park_and_grab(self, x, y):
         """Move the dot far from (x, y) and grab a reference frame of the target area
         without the dot in it. Returns the frame, or None if there's no safe spot."""
+        # Fast path: if the dot is already far from the target (wherever the last aim
+        # left it), the current camera frame already works as the reference.
+        if self.last_pulses is not None:
+            here = self.predict_pixel(*self.last_pulses)[0]
+            if np.all(np.isfinite(here)) and np.hypot(here[0] - x, here[1] - y) >= PARK_MIN_DIST_PX:
+                frame = self.get_frame()
+                return None if frame is None else frame.copy()
         corners = [(PAN_US[a], TILT_US[b]) for a in (0, 1) for b in (0, 1)]
         candidates = corners + [((PAN_US[0] + PAN_US[1]) // 2, t) for t in TILT_US]
         best = None

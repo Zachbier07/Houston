@@ -14,6 +14,12 @@ else:
 
 
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+# Finds use a faster setup. Tested on real desk frames: same boxes (0-3 px apart
+# on 5 of 6 objects) in 1.1-1.5 s instead of 5-10 s with the full-size frame,
+# gemini-3.8-flash and default thinking.
+FIND_MODEL = os.environ.get("GEMINI_FIND_MODEL", "gemini-3.5-flash")
+FIND_IMAGE_WIDTH = 640          # boxes come back normalized, so a smaller image is fine
+FIND_THINKING = "low"
 PROMPT = """
 Analyze the image and list distinct physical objects. Include engineering tools,
 electronic parts, and small items. Include plausible partially visible objects
@@ -116,13 +122,20 @@ class GeminiAnalyzer:
 
     def _analyze(self, frame, request_id, target):
         try:
-            image = self.image_module.fromarray(frame[:, :, ::-1].copy())
+            small = frame
+            if frame.shape[1] > FIND_IMAGE_WIDTH:
+                import cv2
+                height = round(frame.shape[0] * FIND_IMAGE_WIDTH / frame.shape[1])
+                small = cv2.resize(frame, (FIND_IMAGE_WIDTH, height), interpolation=cv2.INTER_AREA)
+            image = self.image_module.fromarray(small[:, :, ::-1].copy())
             prompt = (PROMPT if not target else TARGET_PROMPT.replace(
                 "{target}", json.dumps(target, ensure_ascii=True)))
             print(f"Analyzing captured image for: {target or 'all visible objects'}",
                   flush=True)
+            started = time.monotonic()
             response = self._request_with_retries(image, request_id, prompt,
-                                                  json_response=True)
+                                                  json_response=True, fast=True)
+            print(f"Gemini find took {time.monotonic() - started:.1f} s", flush=True)
             response_text = response.text or "[]"
             items = parse_detections(response_text, frame.shape[1], frame.shape[0])
             if target and not items:
@@ -140,18 +153,18 @@ class GeminiAnalyzer:
             self.state.fail(request_id, message)
 
     def _request_with_retries(self, image, request_id, prompt, json_response=False,
-                              max_output_tokens=120):
+                              max_output_tokens=120, fast=False):
         for attempt in range(4):
             self.state.set_message(request_id, f"Contacting Gemini (attempt {attempt + 1}/4)...")
             try:
+                config = ({"response_mime_type": "application/json"} if json_response
+                          else {"max_output_tokens": max_output_tokens})
+                if fast:
+                    config["thinking_config"] = self.types.ThinkingConfig(thinking_level=FIND_THINKING)
                 return self.client.models.generate_content(
-                    model=MODEL,
+                    model=FIND_MODEL if fast else MODEL,
                     contents=[image, prompt],
-                    config=self.types.GenerateContentConfig(
-                        **({"response_mime_type": "application/json"}
-                           if json_response else {
-                               "max_output_tokens": max_output_tokens})
-                    ),
+                    config=self.types.GenerateContentConfig(**config),
                 )
             except Exception as exc:
                 print(f"Gemini request error (attempt {attempt + 1}/4): {exc}",
