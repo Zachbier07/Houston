@@ -69,5 +69,8 @@ def parse_detections(response_text, width, height):
                 "label": item["label"].strip(),
                 "box": (x1, y1, x2, y2),
                 "center": ((x1 + x2) / (2 * width), (y1 + y2) / (2 * height)),
+                "nearby": [name.strip() for name in item.get("nearby", [])
+                           if isinstance(name, str) and name.strip()][:4]
+                if isinstance(item.get("nearby", []), list) else [],
             })
     return boxes

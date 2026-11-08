@@ -54,11 +54,14 @@ def command_after_wake_word(transcript):
 class VoiceListener:
     """Continuously transcribes microphone speech locally and signals commands."""
 
-    def __init__(self, on_command, on_status):
+    def __init__(self, on_command, on_status, on_greeting=None, on_question=None):
         self.on_command = on_command
         self.on_status = on_status
+        self.on_greeting = on_greeting
+        self.on_question = on_question
         self.stop_event = threading.Event()
         self.thread = None
+        self.ignore_reply_until = 0.0
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -84,7 +87,9 @@ class VoiceListener:
 
             SetLogLevel(-1)
             model = Model(MODEL_PATH)
-            device = sd.query_devices(kind="input")
+            device_setting = os.environ.get("HOUSTON_MIC_DEVICE", "").strip()
+            device_index = int(device_setting) if device_setting else None
+            device = sd.query_devices(device_index, "input")
             sample_rate = int(device["default_samplerate"])
             recognizer = KaldiRecognizer(model, sample_rate)
             audio_queue = queue.Queue(maxsize=32)
@@ -104,8 +109,11 @@ class VoiceListener:
                         pass
 
             self.on_status("Listening for 'Houston' (offline mic recognition)")
+            print(f"Voice listener active on microphone '{device['name']}' "
+                  f"at {sample_rate} Hz. Set HOUSTON_VOICE_DEBUG=1 to see transcripts.",
+                  flush=True)
             with sd.RawInputStream(samplerate=sample_rate, blocksize=4000,
-                                   device=None, dtype="int16", channels=1,
+                                   device=device_index, dtype="int16", channels=1,
                                    callback=on_audio):
                 while not self.stop_event.is_set():
                     try:
@@ -116,18 +124,27 @@ class VoiceListener:
                         transcript = json.loads(recognizer.Result()).get("text", "").strip()
                         if not transcript:
                             continue
+                        if os.environ.get("HOUSTON_VOICE_DEBUG") == "1":
+                            print(f"Vosk heard: {transcript}", flush=True)
                         wake_seen, target = command_after_wake_word(transcript)
                         if wake_seen:
-                            if target:
-                                self._dispatch(target, transcript)
+                            if self._is_greeting(target):
+                                self._greet()
+                                armed_until = 0.0
+                            elif target:
+                                self._handle_request(target, transcript)
                                 armed_until = 0.0
                             else:
                                 armed_until = time.monotonic() + ARM_SECONDS
-                                self.on_status("Houston heard; say what to look for")
+                                self._greet("Houston heard; I'm listening")
                         elif time.monotonic() < armed_until:
-                            target = extract_command_target(transcript)
-                            if target:
-                                self._dispatch(target, transcript)
+                            if (time.monotonic() < self.ignore_reply_until
+                                    and self._is_greeting(transcript)):
+                                continue
+                            if self._is_greeting(transcript):
+                                self._greet()
+                            else:
+                                self._handle_request(transcript, transcript)
                             armed_until = 0.0
                         elif time.monotonic() >= armed_until:
                             self.on_status("Listening for 'Houston' (offline mic recognition)")
@@ -137,6 +154,40 @@ class VoiceListener:
             self.on_status(message)
 
     def _dispatch(self, target, transcript):
-        print(f"Voice command: {transcript}", flush=True)
+        print(f"Wake word accepted. Search request: {transcript}", flush=True)
         self.on_status(f"Houston heard: searching for {target[:40]}")
         self.on_command(target)
+
+    def _handle_request(self, text, transcript):
+        if self._is_question(text) and self.on_question:
+            question = " ".join(text.split())
+            print(f"Voice question: {question}", flush=True)
+            self.on_status("Houston is thinking...")
+            self.on_question(question)
+            return
+        target = extract_command_target(text)
+        if target:
+            self._dispatch(target, transcript)
+        else:
+            self.on_status("I didn't catch an object name. Say Houston, then what to find.")
+
+    @staticmethod
+    def _is_greeting(text):
+        if not text:
+            return False
+        return bool(re.search(
+            r"\b(?:say hi|say hello|hello|hi|hey|how are you|what's up|good morning|good afternoon)\b",
+            text, flags=re.IGNORECASE))
+
+    @staticmethod
+    def _is_question(text):
+        return bool(re.match(
+            r"^(?:what|who|why|how|which|when|explain|describe|tell me about|"
+            r"can you explain|could you explain|do you know|is there|are there)\b",
+            text.strip(), flags=re.IGNORECASE))
+
+    def _greet(self, status="Hi! What should I look for?"):
+        self.on_status(status)
+        self.ignore_reply_until = time.monotonic() + 2.5
+        if self.on_greeting:
+            self.on_greeting("Hi!")

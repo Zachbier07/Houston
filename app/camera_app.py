@@ -23,6 +23,19 @@ def open_camera(cv2, start_index):
     return None, start_index
 
 
+def open_available_camera(cv2, preferred_index, max_indices=10):
+    """Try the preferred webcam, then scan the remaining common indices."""
+    indices = [preferred_index]
+    indices.extend(index for index in range(max_indices) if index != preferred_index)
+    for index in indices:
+        camera, opened_index = open_camera(cv2, index)
+        if camera is not None:
+            if opened_index != preferred_index:
+                print(f"Camera {preferred_index} unavailable; using camera {opened_index} instead.")
+            return camera, opened_index
+    return None, preferred_index
+
+
 def gui_startup_error(cv2):
     """Explain when OpenCV cannot create a desktop window."""
     gui_line = next((line.strip() for line in cv2.getBuildInformation().splitlines()
@@ -224,3 +237,11 @@ class CameraApp:
             self.state.set_notice("Camera frame not ready; try the voice command again")
             return
         self.analyzer.start(frame.copy(), target)
+
+    def handle_voice_question(self, question):
+        """Answer a spoken question using the latest camera frame."""
+        frame = self.latest_frame
+        if frame is None:
+            self.state.set_notice("Camera frame not ready; try the question again")
+            return
+        self.analyzer.answer_question(frame.copy(), question)
