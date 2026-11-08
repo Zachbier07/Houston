@@ -11,6 +11,7 @@ class AnalysisState:
     busy: bool = False
     snapshot: object = None
     request_id: int = 0
+    steps: list = field(default_factory=list)   # pointing steps of the last answer
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def begin(self, frame):
@@ -19,6 +20,7 @@ class AnalysisState:
                 return None
             self.request_id += 1
             self.items = []
+            self.steps = []
             self.message = "Analyzing snapshot..."
             self.error = ""
             self.busy = True
@@ -38,11 +40,13 @@ class AnalysisState:
                 self.error = ""
                 self.busy = False
 
-    def complete_answer(self, request_id, answer):
+    def complete_answer(self, request_id, answer, steps=None):
+        """steps: list of {"label", "say", "center": (x, y) as 0..1 fractions of the frame}."""
         with self.lock:
             if self.request_id == request_id:
                 self.items = []
                 self.message = answer
+                self.steps = list(steps or [])
                 self.error = ""
                 self.busy = False
 

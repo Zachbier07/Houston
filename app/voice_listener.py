@@ -27,6 +27,12 @@ REMOVE_TRAILING_POLITENESS = re.compile(r"\s+(?:please|for me|thanks|thank you)[
 VOICE_OBJECT_CORRECTIONS = {"players": "pliers"}
 
 
+# Words that make a request a question even when it starts with "find" / "where".
+QUESTION_CUE = re.compile(
+    r"\b(?:what|how|which|why|able to|should i|can i|could i|do i|where do|where should|"
+    r"explain|help me (?:build|make|wire|use|measure))\b", re.IGNORECASE)
+
+
 def extract_command_target(words):
     """Strip common conversational wording while retaining the requested item."""
     text = " ".join(words.split()).strip(" ,.!?\t\n")
@@ -237,13 +243,18 @@ class VoiceListener:
 
     @staticmethod
     def _is_question(text):
+        text = text.strip()
         return bool(re.match(
-            r"^(?:what|who|why|how|which|when|explain|describe|tell me|"
-            r"can i|could i|can you|could you|would you|do you|is there|are there)\b",
-            text.strip(), flags=re.IGNORECASE))
+            r"^(?:what|who|why|how|which|when|explain|describe|tell me|show me|"
+            r"where (?:do|does|should|can|could|would|is the best)|"
+            r"can i|could i|can you|could you|would you|do you|is there|are there|should i)\b",
+            text, flags=re.IGNORECASE)) or "?" in text or bool(QUESTION_CUE.search(text))
 
     @staticmethod
     def _is_object_search(text):
+        # "find based off these items what I can build" is a question, not a search
+        if QUESTION_CUE.search(text):
+            return False
         return bool(re.match(
             r"^(?:please\s+)?(?:(?:can|could|would) you\s+)?"
             r"(?:please\s+)?(?:find|look for|search for|locate|spot)\b|"

@@ -32,6 +32,7 @@ class LaserController:
         self.aimer = aimer
         self.notify = notify
         self.speak = speak             # say something out loud (optional)
+        self.tour = None               # {"steps": [...], "current": i} while explaining with the laser
         self.frame_size = None         # (width, height) of raw camera frames
         self.cal = None                # dict while calibrating
         self.move = None               # dict while in move mode
@@ -78,6 +79,39 @@ class LaserController:
         else:
             self._job(lambda: self._point(f"({x:.0f}, {y:.0f})", x, y))
 
+    def explain(self, answer, steps, speak_blocking):
+        """Pointing tour for an answer: say the answer, then for each step point the
+        laser at it and say that step. steps: [{"label", "say", "x", "y"}] in raw
+        camera pixels. speak_blocking(text) returns when the sentence is done."""
+        if self.active() or not steps:
+            return
+        if not self.aimer.calibrated():
+            speak_blocking(answer)
+            self._say("I could point these out, but the laser isn't calibrated: press K.")
+            return
+        self.tour = {"steps": steps, "current": -1}
+
+        def run():
+            speak_blocking(answer)
+            for i, st in enumerate(steps):
+                self.tour["current"] = i
+                if st.get("ready") is not None:
+                    st["ready"].wait(timeout=6)        # zoom-in refinement for this step
+                if st.get("resolve"):
+                    st["x"], st["y"] = st["resolve"]()
+                result = self.aimer.point_at(st["x"], st["y"])
+                self.message = f"Step {i + 1}/{len(steps)}: {st['label']}"
+                print(f"Step {i + 1}: {st['label']} -> "
+                      f"{'out of reach' if result['out_of_reach'] else result.get('pulses')}", flush=True)
+                say = st["say"] or st["label"]
+                if result["out_of_reach"]:
+                    say += " That one is outside my laser's reach."
+                speak_blocking(say)
+            self.message = f"Done explaining ({len(steps)} steps)."
+            self.tour["current"] = len(steps)   # keep the markers up, none highlighted
+
+        self._job(run)
+
     def point_at_item(self, label, x, y, box=None):
         """A find finished: point at it (if calibrated and not busy). With the object's
         box (raw pixels), a partly reachable object gets pointed at its reachable part."""
@@ -123,6 +157,14 @@ class LaserController:
         def to_view(points):
             return (np.asarray(points, float) - [left, top]) * zoom
 
+        if self.tour and not self.cal:
+            for i, st in enumerate(self.tour["steps"]):
+                vx, vy = to_view([(st["x"], st["y"])])[0]
+                current = i == self.tour["current"]
+                color = (0, 230, 0) if current else (0, 200, 255)
+                cv2.circle(view, (int(vx), int(vy)), 14 if current else 10, color, 3)
+                cv2.putText(view, f"{i + 1} {st['label'][:18]}", (int(vx) + 16, int(vy) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
         if self.cal:
             for px, py in self.cal["samples"].values():
                 vx, vy = to_view([(px, py)])[0]

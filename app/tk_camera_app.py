@@ -221,10 +221,12 @@ class CameraApp:
         raw_x, raw_y = self._view_to_raw(x / width, y / height)
         self.laser.click(raw_x, raw_y, right=right)
 
-    def _view_to_raw(self, fx, fy):
-        """Fraction of the (zoomed) view -> pixel in the raw camera frame."""
-        height, width = self.raw_frame.shape[:2]
-        zoom = self.zoom.get()
+    def _view_to_raw(self, fx, fy, zoom=None, size=None):
+        """Fraction of the (zoomed) view -> pixel in the raw camera frame.
+        Pass zoom and size (width, height) when calling from a worker thread:
+        Tk variables may only be read on the UI thread."""
+        width, height = size or (self.raw_frame.shape[1], self.raw_frame.shape[0])
+        zoom = self.zoom.get() if zoom is None else zoom
         crop_w, crop_h = width / zoom, height / zoom
         return (width - crop_w) / 2 + fx * crop_w, (height - crop_h) / 2 + fy * crop_h
 
@@ -400,7 +402,38 @@ class CameraApp:
             answer = "I couldn't find a clear match in that image."
         else:
             answer = message
+            with self.state.lock:
+                steps = list(getattr(self.state, "steps", []))
+            if steps:
+                answer += "\n" + "\n".join(f"{i}. {st['label']}: {st['say']}"
+                                            for i, st in enumerate(steps, 1))
+                self._start_explanation(message, steps)
         self._append_chat("Houston", answer)
+
+    def _start_explanation(self, message, steps):
+        """Speak the answer and point at each step (the laser tour)."""
+        spoken = getattr(self.analyzer, "last_spoken_answer", "") or message.split("\n")[0]
+
+        def speak_blocking(text):
+            if self.speaker:
+                self.speaker._speak(text)          # returns when the sentence has played
+            else:
+                time.sleep(min(5.0, 0.6 + len(text) / 15))
+
+        if self.laser and self.raw_frame is not None:
+            raw_steps = []
+            zoom = self.zoom.get()                       # read Tk state here, on the UI thread
+            size = (self.raw_frame.shape[1], self.raw_frame.shape[0])
+            for st in steps:
+                x, y = self._view_to_raw(*st["center"])
+                raw_steps.append({"label": st["label"], "say": st["say"], "x": x, "y": y,
+                                  # the zoom-in refinement may still be running: the tour
+                                  # waits for it, then reads the final spot
+                                  "ready": st.get("ready"),
+                                  "resolve": lambda st=st: self._view_to_raw(*st["center"], zoom, size)})
+            self.laser.explain(spoken, raw_steps, speak_blocking)
+        elif self.speaker:
+            self.speaker.speak(spoken + " " + " ".join(st["say"] for st in steps))
 
     def _send_chat(self, _event=None):
         text = self.entry.get().strip()
