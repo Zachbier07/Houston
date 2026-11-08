@@ -99,6 +99,7 @@ def main():
         state.set_notice,
         on_greeting=app.handle_voice_greeting,
         on_question=app.handle_voice_question,
+        on_stop=app.handle_voice_stop,
     )
     app.attach_voice_listener(voice_listener)
     try:
