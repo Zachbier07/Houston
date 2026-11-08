@@ -26,6 +26,8 @@ import numpy as np
 
 from .aim import CENTER_US, PAN_US, TILT_US
 
+SAME_SPOT_PX = 40               # two tour steps closer than this count as the same spot
+
 
 class LaserController:
     def __init__(self, aimer, notify, speak=None):
@@ -99,6 +101,20 @@ class LaserController:
                     st["ready"].wait(timeout=6)        # zoom-in refinement for this step
                 if st.get("resolve"):
                     st["x"], st["y"] = st["resolve"]()
+                # Two different things must not end up on the same spot: if refinement
+                # put this step on top of an earlier one whose first guess was
+                # elsewhere, go back to this step's own first guess.
+                first = st.get("first")
+                if first:
+                    for prev in steps[:i]:
+                        pf = prev.get("first") or (prev["x"], prev["y"])
+                        same_now = np.hypot(st["x"] - prev["x"], st["y"] - prev["y"]) < SAME_SPOT_PX
+                        apart_before = np.hypot(first[0] - pf[0], first[1] - pf[1]) > 2 * SAME_SPOT_PX
+                        if same_now and apart_before:
+                            print(f"Step {i + 1} landed on step {steps.index(prev) + 1}'s spot; "
+                                  "using its first guess", flush=True)
+                            st["x"], st["y"] = first
+                            break
                 result = self.aimer.point_at(st["x"], st["y"])
                 self.message = f"Step {i + 1}/{len(steps)}: {st['label']}"
                 print(f"Step {i + 1}: {st['label']} -> "

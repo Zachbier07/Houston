@@ -427,6 +427,7 @@ class CameraApp:
             for st in steps:
                 x, y = self._view_to_raw(*st["center"])
                 raw_steps.append({"label": st["label"], "say": st["say"], "x": x, "y": y,
+                                  "first": (x, y),            # first guess, before refinement
                                   # the zoom-in refinement may still be running: the tour
                                   # waits for it, then reads the final spot
                                   "ready": st.get("ready"),
