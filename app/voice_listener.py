@@ -30,7 +30,7 @@ VOICE_OBJECT_CORRECTIONS = {"players": "pliers"}
 # Words that make a request a question even when it starts with "find" / "where".
 QUESTION_CUE = re.compile(
     r"\b(?:what|how|which|why|able to|should i|can i|could i|do i|where do|where should|"
-    r"explain|help me (?:build|make|wire|use|measure))\b", re.IGNORECASE)
+    r"explain|help me (?:build|make|wire|use|measure)|plug|plugged|connect|hook up|wire up)\b", re.IGNORECASE)
 
 
 def extract_command_target(words):
