@@ -24,6 +24,7 @@ COMMAND_PREFIXES = (
 )
 REMOVE_LEADING_DETERMINERS = re.compile(r"^(?:(?:my|the|a|an|some)\s+)+", re.IGNORECASE)
 REMOVE_TRAILING_POLITENESS = re.compile(r"\s+(?:please|for me|thanks|thank you)[.!?]*$", re.IGNORECASE)
+VOICE_OBJECT_CORRECTIONS = {"players": "pliers"}
 
 
 def extract_command_target(words):
@@ -38,8 +39,14 @@ def extract_command_target(words):
                 break
         if text == previous:
             break
+    # Vosk sometimes inserts a past-tense verb after a spoken "find", e.g.
+    # "find my pliers" can become "find found my players". Once the command
+    # prefix is stripped, discard that stray word.
+    text = re.sub(r"^found\s+(?=(?:my|the|a|an)\s+)\s*", "", text,
+                  flags=re.IGNORECASE)
     text = REMOVE_LEADING_DETERMINERS.sub("", text)
     text = REMOVE_TRAILING_POLITENESS.sub("", text).strip(" ,.!?\t\n")
+    text = VOICE_OBJECT_CORRECTIONS.get(text.casefold(), text)
     return text
 
 
@@ -62,6 +69,8 @@ class VoiceListener:
         self.stop_event = threading.Event()
         self.thread = None
         self.ignore_reply_until = 0.0
+        configured_device = os.environ.get("HOUSTON_MIC_DEVICE", "").strip()
+        self.device_index = int(configured_device) if configured_device else None
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -76,6 +85,47 @@ class VoiceListener:
         if self.thread and self.thread is not threading.current_thread():
             self.thread.join(timeout=2)
 
+    @staticmethod
+    def input_devices():
+        """Return available microphone IDs and names for the UI selector."""
+        import sounddevice as sd
+        devices = [(index, device.get("name", f"Input {index}"))
+                   for index, device in enumerate(sd.query_devices())
+                   if int(device.get("max_input_channels", 0) or 0) > 0]
+        try:
+            default_index = sd.default.device[0]
+            if default_index is not None and int(default_index) >= 0:
+                info = sd.query_devices(int(default_index), "input")
+                if all(index != int(default_index) for index, _name in devices):
+                    devices.insert(0, (int(default_index),
+                                       f"System default: {info.get('name', 'Microphone')}"))
+        except Exception:
+            pass
+        if not devices:
+            try:
+                info = sd.query_devices(kind="input")
+                devices.append((None, f"System default: {info.get('name', 'Microphone')}"))
+            except Exception:
+                pass
+        return devices
+
+    def set_device(self, device_index):
+        """Switch microphone by restarting the offline recognition stream."""
+        self.device_index = device_index
+        self.stop()
+        self.start()
+
+    def submit_text(self, text):
+        """Route typed chat input through the same search/question intent logic."""
+        text = " ".join(text.split()).strip()
+        if not text:
+            return
+        text = re.sub(r"^houston[,:]?\s*", "", text, flags=re.IGNORECASE)
+        if self._is_greeting(text):
+            self._greet()
+        else:
+            self._handle_request(text, text, log_user=False)
+
     def _listen(self):
         try:
             import sounddevice as sd
@@ -87,8 +137,7 @@ class VoiceListener:
 
             SetLogLevel(-1)
             model = Model(MODEL_PATH)
-            device_setting = os.environ.get("HOUSTON_MIC_DEVICE", "").strip()
-            device_index = int(device_setting) if device_setting else None
+            device_index = self.device_index
             device = sd.query_devices(device_index, "input")
             sample_rate = int(device["default_samplerate"])
             recognizer = KaldiRecognizer(model, sample_rate)
@@ -158,7 +207,14 @@ class VoiceListener:
         self.on_status(f"Houston heard: searching for {target[:40]}")
         self.on_command(target)
 
-    def _handle_request(self, text, transcript):
+    def _handle_request(self, text, transcript, log_user=True):
+        if log_user:
+            self.on_status(f"Heard: {transcript}")
+        if self._is_object_search(text):
+            target = extract_command_target(text)
+            if target:
+                self._dispatch(target, transcript)
+            return
         if self._is_question(text) and self.on_question:
             question = " ".join(text.split())
             print(f"Voice question: {question}", flush=True)
@@ -182,8 +238,16 @@ class VoiceListener:
     @staticmethod
     def _is_question(text):
         return bool(re.match(
-            r"^(?:what|who|why|how|which|when|explain|describe|tell me about|"
-            r"can you explain|could you explain|do you know|is there|are there)\b",
+            r"^(?:what|who|why|how|which|when|explain|describe|tell me|"
+            r"can i|could i|can you|could you|would you|do you|is there|are there)\b",
+            text.strip(), flags=re.IGNORECASE))
+
+    @staticmethod
+    def _is_object_search(text):
+        return bool(re.match(
+            r"^(?:please\s+)?(?:(?:can|could|would) you\s+)?"
+            r"(?:please\s+)?(?:find|look for|search for|locate|spot)\b|"
+            r"^(?:where is|where's|where are|where did i (?:leave|put|last see))\b",
             text.strip(), flags=re.IGNORECASE))
 
     def _greet(self, status="Hi! What should I look for?"):

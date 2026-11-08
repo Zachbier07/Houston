@@ -21,7 +21,8 @@ class ElevenLabsSpeaker:
 
     def speak(self, text):
         """Speak a short phrase in a worker so callers stay responsive."""
-        text = " ".join(text.split())[:160]
+        # Speak the complete answer returned by the model.
+        text = " ".join(text.split())
         if not text:
             return
         threading.Thread(target=self._speak, args=(text,), daemon=True,

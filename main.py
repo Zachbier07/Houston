@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+import traceback
 
 
 def load_api_keys():
@@ -40,8 +41,9 @@ def main():
         return 2
 
     from app.analyzer import GeminiAnalyzer, create_client
-    from app.camera_app import CameraApp, gui_startup_error, open_available_camera
+    from app.camera_app import open_available_camera
     from app.state import AnalysisState
+    from app.tk_camera_app import CameraApp, gui_startup_error
     from app.voice_listener import VoiceListener
 
     gui_error = gui_startup_error(cv2)
@@ -72,17 +74,21 @@ def main():
     analyzer = GeminiAnalyzer(create_client(gemini_key, genai, types), Image, types,
                               state, speaker=speaker)
     app = CameraApp(cv2, camera, camera_index, analyzer, state)
+    app.speaker = speaker
     voice_listener = VoiceListener(
         app.handle_voice_command,
         state.set_notice,
-        on_greeting=(lambda reply: speaker.speak(reply))
-        if speaker else None,
+        on_greeting=app.handle_voice_greeting,
         on_question=app.handle_voice_question,
     )
-    app.voice_listener = voice_listener
+    app.attach_voice_listener(voice_listener)
     try:
         app.run()
     except cv2.error:
+        return 1
+    except Exception as exc:
+        print(f"Houston stopped after an application error: {exc}", file=sys.stderr)
+        traceback.print_exc()
         return 1
     return 0
 

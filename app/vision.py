@@ -4,6 +4,7 @@ import re
 
 
 ZOOM_MIN = 1.0
+CONFIDENCE_THRESHOLD = 0.75
 _OBJECT_NAME = re.compile(r"^[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+){0,7}$")
 _INSTRUCTION_WORDS = {
     "act", "answer", "assistant", "developer", "disclose", "disregard",
@@ -69,8 +70,18 @@ def parse_detections(response_text, width, height):
                 "label": item["label"].strip(),
                 "box": (x1, y1, x2, y2),
                 "center": ((x1 + x2) / (2 * width), (y1 + y2) / (2 * height)),
+                "confidence": _confidence(item.get("confidence", 0.8)),
+                "note": item.get("note", "").strip()
+                if isinstance(item.get("note", ""), str) else "",
                 "nearby": [name.strip() for name in item.get("nearby", [])
                            if isinstance(name, str) and name.strip()][:4]
                 if isinstance(item.get("nearby", []), list) else [],
             })
     return boxes
+
+
+def _confidence(value):
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.5
