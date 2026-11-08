@@ -52,6 +52,8 @@ CAL_GRID = (6, 5)               # pan x tilt calibration points (skip the ones y
 APPROACH_US = 40                # come at every position from this far below, to take up gear slop
 APPROACH_WAIT_S = 0.15
 MIN_CORRECTION_SAMPLES = 10     # the smooth correction needs at least this many clicks
+REACH_TOLERANCE_PX = 12         # past a servo limit but the clamped aim lands this close: still reachable
+MAX_FIT_ERROR_PX = 40           # refuse (and keep the old calibration) if the fit is worse than this
 CORRECTION_RIDGE = 0.001        # how hard the correction is pulled toward "no correction"
                                 # (tested in tools/aim_sim.py: lower overfits sloppy clicks)
 MIN_CAL_POINTS = 6              # the model has 11 numbers; 6 clicks is the bare minimum
@@ -152,6 +154,7 @@ class Aimer:
         returns a summary string. Raises if there aren't enough points."""
         if len(samples) < MIN_CAL_POINTS:
             raise RuntimeError(f"Need at least {MIN_CAL_POINTS} clicked points, have {len(samples)}.")
+        backup = (self.params, self.frame_size, self.rms_px, self.samples)
         s = np.array(samples, float)
         pans, tilts, px = s[:, 0], s[:, 1], s[:, 2:4]
         width, height = frame_size
@@ -161,7 +164,7 @@ class Aimer:
         # 1) Starting guess: servo scale from the datasheet, try many tilt offsets,
         #    solve H linearly for each, keep the best.
         best = None
-        for tilt0 in np.radians(np.arange(-85, 86, 5)):
+        for tilt0 in np.radians(np.arange(-175, 180, 5)):   # incl. past vertical
             for k_tilt in (US_PER_RAD, -US_PER_RAD):
                 d = _direction(pans, tilts, US_PER_RAD, k_tilt, tilt0)
                 H = _fit_homography(d, pxn)
@@ -200,6 +203,9 @@ class Aimer:
             model = np.array([self._model_pulses(x, y) or (np.nan, np.nan) for x, y in px])
             ok = np.all(np.isfinite(model), axis=1)
             if ok.sum() >= MIN_CORRECTION_SAMPLES:
+                # Near straight-down, pan is very sensitive; leave wild points out.
+                ok &= np.all(np.abs(s[:, :2] - model) < 80, axis=1)
+            if ok.sum() >= MIN_CORRECTION_SAMPLES:
                 A = _poly(px[ok, 0] / width, px[ok, 1] / height)
                 reg = CORRECTION_RIDGE * len(A) * np.eye(A.shape[1])
                 reg[0, 0] = 0   # a constant offset is cheap to allow
@@ -211,6 +217,12 @@ class Aimer:
         landed = self.predict_pixel(aimed[:, 0], aimed[:, 1])
         err_px = np.linalg.norm(np.nan_to_num(landed - self.predict_pixel(pans, tilts), nan=999), axis=1)
         self.rms_px = float(np.sqrt(np.mean(err_px ** 2)))
+        if self.rms_px > MAX_FIT_ERROR_PX:
+            bad = self.rms_px
+            self.params, self.frame_size, self.rms_px, self.samples = backup
+            raise RuntimeError(f"Calibration fit was bad ({bad:.0f} px average error), so it was NOT saved; "
+                               "the previous calibration is still in use. Redo K and only click the dot "
+                               "when you can clearly see it.")
         self.save()
         worst = int(np.argmax(err_px))
         summary = (f"Calibrated from {len(samples)} clicks: average error {self.rms_px:.1f} px "
@@ -250,21 +262,38 @@ class Aimer:
         p = self.params
         d = np.linalg.solve(np.array(p["H"]), np.array([x, y, 1.0]))
         d /= np.linalg.norm(d)
+        # Every beam direction can be reached two ways: (pan, tilt), or pan swung
+        # 180 degrees with tilt past vertical. When the laser points nearly straight
+        # down, the tilt range crosses vertical and BOTH matter. Try them all (and
+        # pan wrapped by a full turn) and keep the one inside the servo limits.
         best = None
-        for cand in (d, -d):   # a direction and its opposite give the same pixel; keep the real one
+        for cand in (d, -d):   # a direction and its opposite give the same pixel
             phi = np.arcsin(np.clip(cand[2], -1, 1))
             theta = np.arctan2(cand[0], cand[1])
-            pan = CENTER_US[0] + theta * p["k_pan"]
-            tilt = CENTER_US[1] + (phi - p["tilt0"]) * p["k_tilt"]
-            # sanity check: does it really map back to the target?
-            back = self.predict_pixel(pan, tilt)[0]
-            miss = np.hypot(back[0] - x, back[1] - y)
-            outside = max(0, PAN_US[0] - pan, pan - PAN_US[1]) + max(0, TILT_US[0] - tilt, tilt - TILT_US[1])
-            score = (miss > 2, outside)
-            if best is None or score < best[0]:
-                best = (score, pan, tilt)
-        (bad_fit, _), pan, tilt = best
-        return None if bad_fit else (pan, tilt)
+            for th, ph in ((theta, phi), (theta + np.pi, np.pi - phi), (theta + np.pi, -np.pi - phi)):
+                for turn in (-2 * np.pi, 0.0, 2 * np.pi):
+                    pan = CENTER_US[0] + (th + turn) * p["k_pan"]
+                    tilt = CENTER_US[1] + (ph - p["tilt0"]) * p["k_tilt"]
+                    # sanity check: does it really map back to the target?
+                    back = self.predict_pixel(pan, tilt)[0]
+                    miss = np.hypot(back[0] - x, back[1] - y)
+                    outside = (max(0, PAN_US[0] - pan, pan - PAN_US[1])
+                               + max(0, TILT_US[0] - tilt, tilt - TILT_US[1]))
+                    score = (not np.isfinite(miss) or miss > 2, outside)
+                    if best is None or score < best[0]:
+                        best = (score, pan, tilt)
+        (bad_fit, outside), pan, tilt = best
+        if bad_fit:
+            return None
+        if outside > 0:
+            # Just past a limit? Near straight-down, pan hardly moves the dot, so the
+            # clamped position may still land on the target.
+            cp = min(max(pan, PAN_US[0]), PAN_US[1])
+            ct = min(max(tilt, TILT_US[0]), TILT_US[1])
+            back = self.predict_pixel(cp, ct)[0]
+            if np.hypot(back[0] - x, back[1] - y) <= REACH_TOLERANCE_PX:
+                return cp, ct
+        return pan, tilt
 
     def reachable(self, x, y):
         pulses = self.pulses_for(x, y)
