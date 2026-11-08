@@ -14,7 +14,7 @@ from PIL import Image, ImageTk
 from .camera_app import ZOOM_MAX, ZOOM_MIN, open_camera
 from .laser_controller import LaserController
 from .vision import CONFIDENCE_THRESHOLD, digital_zoom
-from .voice_listener import VoiceListener, extract_command_target
+from .voice_listener import VoiceListener, extract_command_target, route_request
 
 
 class CameraApp:
@@ -455,8 +455,7 @@ class CameraApp:
             self._append_chat("Houston", "Hi!")
             if self.speaker:
                 self.speaker.speak("Hi!")
-        elif (VoiceListener._is_question(request)
-              and not VoiceListener._is_object_search(request)):
+        elif route_request(request) == "question":
             self.analyzer.answer_question(self.latest_frame.copy(), request)
         else:
             target = extract_command_target(request)

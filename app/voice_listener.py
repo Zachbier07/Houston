@@ -51,6 +51,27 @@ QUESTION_CUE = re.compile(
     r"explain|help me (?:build|make|wire|use|measure)|plug|plugged|connect|hook up|wire up)\b", re.IGNORECASE)
 
 
+INSTRUCTION_VERBS = {"read", "check", "count", "compare", "identify", "measure", "test", "list",
+                     "name", "label", "help", "teach", "walk", "guide", "point", "summarize",
+                     "translate", "spell", "solve", "calculate", "inspect", "verify", "rate"}
+FIND_MAX_WORDS = 4   # a bare request this short ("pliers", "the red multimeter") is an object to find
+
+
+def route_request(text):
+    """'find' or 'question'. Find only when it clearly is one: search wording
+    ("find the pliers", "where are my keys") or a short object name. Everything
+    else ("read me the card", "count the batteries", "check my build") is a
+    question; the question path can still point the laser at things."""
+    if VoiceListener._is_object_search(text):
+        return "find"
+    if VoiceListener._is_question(text):
+        return "question"
+    words = re.findall(r"[A-Za-z0-9']+", text)
+    if words and words[0].lower() in INSTRUCTION_VERBS:
+        return "question"            # "check my build", "read the label", "count the cans"
+    return "find" if len(words) <= FIND_MAX_WORDS else "question"
+
+
 def extract_command_target(words):
     """Strip common conversational wording while retaining the requested item."""
     text = " ".join(words.split()).strip(" ,.!?\t\n")
@@ -222,7 +243,11 @@ class VoiceListener:
                         self._greet()
                         armed_until = 0.0
                     elif target:
-                        self._handle_request(target, transcript)
+                        # Route on everything said after "Houston", not the version with
+                        # "can you / please" stripped off (that turned "can you read me
+                        # the card" into a search for "read me the card").
+                        after = transcript[re.search(r"\bhouston\b", transcript, re.IGNORECASE).end():]
+                        self._handle_request(after.strip(" ,.!?:;") or target, transcript)
                         armed_until = 0.0
                     else:
                         armed_until = time.monotonic() + ARM_SECONDS
@@ -303,7 +328,7 @@ class VoiceListener:
             if target:
                 self._dispatch(target, transcript)
             return
-        if self._is_question(text) and self.on_question:
+        if route_request(text) == "question" and self.on_question:
             question = " ".join(text.split())
             print(f"Voice question: {question}", flush=True)
             self.on_status("Houston is thinking...")
