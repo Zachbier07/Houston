@@ -38,6 +38,14 @@ class AnalysisState:
                 self.error = ""
                 self.busy = False
 
+    def complete_answer(self, request_id, answer):
+        with self.lock:
+            if self.request_id == request_id:
+                self.items = []
+                self.message = answer
+                self.error = ""
+                self.busy = False
+
     def fail(self, request_id, error):
         with self.lock:
             if self.request_id == request_id:

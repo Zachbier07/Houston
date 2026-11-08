@@ -2,23 +2,25 @@
 import argparse
 import os
 import sys
+import traceback
 
 
-def load_api_key():
-    """Read the key from the environment or ignored local key file."""
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if api_key:
-        return api_key
+def load_api_keys():
+    """Read Gemini then ElevenLabs keys from env vars or api_key.txt."""
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    elevenlabs_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     key_file = os.path.join(os.path.dirname(__file__), "api_key.txt")
     try:
         with open(key_file, encoding="utf-8") as key_source:
-            for line in key_source:
-                candidate = line.strip()
-                if candidate and not candidate.startswith("#"):
-                    return candidate
+            file_keys = [line.strip() for line in key_source
+                         if line.strip() and not line.lstrip().startswith("#")]
     except OSError:
-        pass
-    return ""
+        file_keys = []
+    if not gemini_key and file_keys:
+        gemini_key = file_keys[0]
+    if not elevenlabs_key and len(file_keys) > 1:
+        elevenlabs_key = file_keys[1]
+    return gemini_key, elevenlabs_key
 
 
 def main():
@@ -43,26 +45,39 @@ def main():
         return 2
 
     from app.analyzer import GeminiAnalyzer, create_client
-    from app.camera_app import CameraApp, gui_startup_error, open_camera
+    from app.camera_app import open_available_camera
     from app.state import AnalysisState
+    from app.tk_camera_app import CameraApp, gui_startup_error
     from app.voice_listener import VoiceListener
 
     gui_error = gui_startup_error(cv2)
     if gui_error:
         print(gui_error, file=sys.stderr)
         return 2
-    api_key = load_api_key()
-    if not api_key:
-        print("Put your Gemini API key in api_key.txt or set GEMINI_API_KEY.")
+    gemini_key, elevenlabs_key = load_api_keys()
+    if not gemini_key:
+        print("Put your Gemini API key first in api_key.txt or set GEMINI_API_KEY.")
         return 2
 
-    camera, camera_index = open_camera(cv2, args.camera)
+    camera, camera_index = open_available_camera(cv2, args.camera)
     if camera is None:
-        print(f"Could not open webcam {camera_index}.")
+        print(f"Could not open a webcam (tried indices {args.camera} and 0-9).")
+        if sys.platform.startswith("linux"):
+            print("Check that /dev/video* exists, your user can access the device "
+                  "(often the video group), and another app is not using the webcam.")
+        print("You can select the first camera to try with: python main.py --camera N")
         return 1
 
     state = AnalysisState()
-    analyzer = GeminiAnalyzer(create_client(api_key, genai, types), Image, types, state)
+    from app.speaker import ElevenLabsSpeaker
+
+    speaker = ElevenLabsSpeaker(elevenlabs_key) if elevenlabs_key else None
+    if speaker is None:
+        print("ElevenLabs key not found; voice replies are disabled. Add it as the second key in api_key.txt.",
+              file=sys.stderr)
+    analyzer = GeminiAnalyzer(create_client(gemini_key, genai, types), Image, types,
+                              state, speaker=speaker)
+
     aimer = None
     if not args.no_laser:
         from app.serial_link import SerialLink
@@ -76,11 +91,21 @@ def main():
             print("No Arduino found: running without the laser.")
 
     app = CameraApp(cv2, camera, camera_index, analyzer, state, aimer=aimer)
-    voice_listener = VoiceListener(app.handle_voice_command, state.set_notice)
-    app.voice_listener = voice_listener
+    app.speaker = speaker
+    voice_listener = VoiceListener(
+        app.handle_voice_command,
+        state.set_notice,
+        on_greeting=app.handle_voice_greeting,
+        on_question=app.handle_voice_question,
+    )
+    app.attach_voice_listener(voice_listener)
     try:
         app.run()
     except cv2.error:
+        return 1
+    except Exception as exc:
+        print(f"Houston stopped after an application error: {exc}", file=sys.stderr)
+        traceback.print_exc()
         return 1
     return 0
 
