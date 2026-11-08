@@ -57,7 +57,7 @@ REACH_TOLERANCE_PX = 12         # past a servo limit but the clamped aim lands t
 MAX_FIT_ERROR_PX = 40           # refuse (and keep the old calibration) if the fit is worse than this
 CORRECTION_RIDGE = 0.001        # how hard the correction is pulled toward "no correction"
                                 # (tested in tools/aim_sim.py: lower overfits sloppy clicks)
-MIN_CAL_POINTS = 6              # the model has 11 numbers; 6 clicks is the bare minimum
+MIN_CAL_POINTS = 8              # the model has 13 numbers; 8 clicks is the bare minimum
 US_PER_RAD = 1856 / np.pi       # Servo library: 544..2400 us = 0..180 degrees (starting guess)
 
 # Camera check after aiming (only if the app gives us camera frames).
@@ -77,12 +77,27 @@ CALIBRATION_FILE = Path(__file__).resolve().parent.parent / "data" / "aim_calibr
 # ================================================================
 
 
-def _direction(pan_us, tilt_us, k_pan, k_tilt, tilt0):
-    """Unit laser direction for servo pulses. Pan swings around the vertical
-    axis, tilt swings the beam up/down in the panned plane."""
-    theta = (np.asarray(pan_us, float) - CENTER_US[0]) / k_pan
-    phi = (np.asarray(tilt_us, float) - CENTER_US[1]) / k_tilt + tilt0
-    return np.stack([np.cos(phi) * np.sin(theta), np.cos(phi) * np.cos(theta), np.sin(phi)], axis=-1)
+def _direction(pan_us, tilt_us, k_pan, k_tilt, tilt0, beta=0.0, alpha=0.0):
+    """Unit laser direction for servo pulses. Pan swings around the vertical axis,
+    tilt swings the beam up/down. Two build imperfections of real pan-tilt mounts:
+      beta   the laser isn't exactly perpendicular to the tilt axis (few degrees)
+      alpha  the tilt axis isn't exactly square to the pan axis (few degrees)
+    Both matter a lot when the beam points nearly straight down. (beta = alpha = 0
+    is the ideal mount.)"""
+    th = (np.asarray(pan_us, float) - CENTER_US[0]) / k_pan
+    ph = (np.asarray(tilt_us, float) - CENTER_US[1]) / k_tilt + tilt0
+    th, ph = np.broadcast_arrays(th, ph)
+    # laser in the tilt frame, beta off perpendicular to the tilt axis
+    bx, by, bz = np.full(th.shape, np.sin(beta)), np.full(th.shape, np.cos(beta)), np.zeros(th.shape)
+    # tilt: rotate about x
+    c, sn = np.cos(ph), np.sin(ph)
+    by, bz = c * by - sn * bz, sn * by + c * bz
+    # tilt axis tipped by alpha: rotate about y
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    bx, bz = ca * bx + sa * bz, -sa * bx + ca * bz
+    # pan: rotate about z
+    ct, st = np.cos(th), np.sin(th)
+    return np.stack([ct * bx + st * by, -st * bx + ct * by, bz], axis=-1)
 
 
 def _project(H, d):
@@ -164,36 +179,52 @@ class Aimer:
 
         # 1) Starting guess: servo scale from the datasheet, try many tilt offsets,
         #    solve H linearly for each, keep the best.
-        best = None
+        guesses = []
         for tilt0 in np.radians(np.arange(-175, 180, 5)):   # incl. past vertical
             for k_tilt in (US_PER_RAD, -US_PER_RAD):
-                d = _direction(pans, tilts, US_PER_RAD, k_tilt, tilt0)
-                H = _fit_homography(d, pxn)
-                if H is None:
-                    continue
-                err = np.mean(np.linalg.norm(_project(H, d) - pxn, axis=1))
-                if np.isfinite(err) and (best is None or err < best[0]):
-                    best = (err, k_tilt, tilt0, H)
-        if best is None:
+                for beta in np.radians((-20, -10, 0, 10, 20)):
+                    for alpha in np.radians((-8, 0, 8)):
+                        d = _direction(pans, tilts, US_PER_RAD, k_tilt, tilt0, beta, alpha)
+                        H = _fit_homography(d, pxn)
+                        if H is None or abs(H[2, 2]) < 1e-12:
+                            continue
+                        err = np.mean(np.linalg.norm(_project(H, d) - pxn, axis=1))
+                        if np.isfinite(err):
+                            guesses.append((err, k_tilt, tilt0, beta, alpha, H))
+        if not guesses:
             raise RuntimeError("Couldn't fit the clicks. Try again with more spread-out points.")
-        _, k_tilt, tilt0, H = best
 
-        # 2) Refine everything together (servo scales, tilt offset, H).
+        # 2) Refine everything together: servo scales, tilt offset, H, and the two
+        #    mount angles (laser off-perpendicular, tilt axis off-square).
         def residuals(v):
-            d = _direction(pans, tilts, v[0], v[1], v[2])
-            Hv = np.append(v[3:], 1.0).reshape(3, 3)
+            d = _direction(pans, tilts, v[0], v[1], v[2], v[11], v[12])
+            Hv = np.append(v[3:11], 1.0).reshape(3, 3)
             return (_project(Hv, d) - pxn).ravel()
 
-        H = H / H[2, 2]
-        x0 = np.concatenate([[US_PER_RAD, k_tilt, tilt0], H.ravel()[:8]])
-        result = least_squares(residuals, x0, method="trf")
+        # Refine the best few starting guesses and keep the best result: with 13
+        # numbers a single start can get stuck in a wrong solution.
+        guesses.sort(key=lambda g: g[0])
+        result = None
+        for _, k_tilt, tilt0, beta, alpha, H in guesses[:8]:
+            H = H / H[2, 2]
+            x0 = np.concatenate([[US_PER_RAD, k_tilt, tilt0], H.ravel()[:8], [beta, alpha]])
+            try:
+                r = least_squares(residuals, x0, method="trf")
+            except ValueError:
+                continue
+            if np.isfinite(r.cost) and (result is None or r.cost < result.cost):
+                result = r
+        if result is None:
+            raise RuntimeError("Couldn't fit the clicks. Try again with more spread-out points.")
         v = result.x
-        H = np.append(v[3:], 1.0).reshape(3, 3)
+        H = np.append(v[3:11], 1.0).reshape(3, 3)
 
         # Store H in pixel units.
         H_px = np.diag([width, height, 1.0]) @ H
         self.params = {"k_pan": float(v[0]), "k_tilt": float(v[1]), "tilt0": float(v[2]),
+                       "beta": float(v[11]), "alpha": float(v[12]),
                        "H": H_px.tolist(), "correction": None}
+        self._lut = self._reach = None
         self.frame_size = (int(width), int(height))
         self.samples = [tuple(float(c) for c in row) for row in samples]
 
@@ -228,7 +259,9 @@ class Aimer:
         worst = int(np.argmax(err_px))
         summary = (f"Calibrated from {len(samples)} clicks: average error {self.rms_px:.1f} px "
                    f"(worst {err_px[worst]:.1f} px at pan {int(pans[worst])} tilt {int(tilts[worst])})"
-                   f"{', with correction' if self.params['correction'] else ''}.")
+                   f"{', with correction' if self.params['correction'] else ''}; "
+                   f"mount: laser {np.degrees(self.params['beta']):+.1f} deg, "
+                   f"tilt axis {np.degrees(self.params['alpha']):+.1f} deg).")
         log.info(summary)
         return summary
 
@@ -245,12 +278,12 @@ class Aimer:
     def predict_pixel(self, pan_us, tilt_us):
         """Servo pulses -> where the dot lands in the camera image (on the table plane)."""
         p = self.params
-        d = _direction(np.atleast_1d(pan_us), np.atleast_1d(tilt_us), p["k_pan"], p["k_tilt"], p["tilt0"])
-        return _project(np.array(p["H"]), d)
+        d = _direction(np.atleast_1d(pan_us), np.atleast_1d(tilt_us), p["k_pan"], p["k_tilt"],
+                       p["tilt0"], p.get("beta", 0.0), p.get("alpha", 0.0))
+        return _project(np.array(p["H"]), d.reshape(-1, 3))
 
     def pulses_for(self, x, y):
-        """Pixel -> (pan_us, tilt_us), or None if no servo position lands there.
-        The pulses may be outside the servo limits; see reachable()."""
+        """Pixel -> (pan_us, tilt_us), or None if no servo position lands there."""
         pulses = self._model_pulses(x, y)
         corr = self.params.get("correction")
         if pulses is None or not corr:
@@ -258,37 +291,53 @@ class Aimer:
         f = _poly(x / self.frame_size[0], y / self.frame_size[1])[0]
         return pulses[0] + f @ np.array(corr[0]), pulses[1] + f @ np.array(corr[1])
 
+    def _table(self):
+        """Where a dense grid of servo positions lands (a little past the limits too).
+        Used as starting points for the pixel -> pulses solve."""
+        if getattr(self, "_lut", None) is None:
+            pans = np.linspace(PAN_US[0] - 150, PAN_US[1] + 150, 90)
+            tilts = np.linspace(TILT_US[0] - 150, TILT_US[1] + 150, 70)
+            P = np.array([(a, b) for b in tilts for a in pans])
+            X = self.predict_pixel(P[:, 0], P[:, 1])
+            ok = np.all(np.isfinite(X), axis=1)
+            self._lut = (P[ok], X[ok])
+        return self._lut
+
     def _model_pulses(self, x, y):
-        """Pixel -> pulses from the geometry model alone (no correction)."""
-        p = self.params
-        d = np.linalg.solve(np.array(p["H"]), np.array([x, y, 1.0]))
-        d /= np.linalg.norm(d)
-        # Every beam direction can be reached two ways: (pan, tilt), or pan swung
-        # 180 degrees with tilt past vertical. When the laser points nearly straight
-        # down, the tilt range crosses vertical and BOTH matter. Try them all (and
-        # pan wrapped by a full turn) and keep the one inside the servo limits.
+        """Pixel -> pulses from the geometry model alone (no correction). Solved
+        numerically: start from the nearest table entries (spread out, so both
+        "wedges" near straight-down are tried) and refine. Keeps the answer inside
+        the servo limits when there is one."""
+        P, X = self._table()
+        order = np.argsort(np.hypot(X[:, 0] - x, X[:, 1] - y))
+        starts = []
+        for i in order[:200]:
+            if all(np.hypot(*(P[i] - P[j])) > 80 for j in starts):
+                starts.append(i)
+            if len(starts) == 5:
+                break
+        target = np.array([x, y], float)
         best = None
-        for cand in (d, -d):   # a direction and its opposite give the same pixel
-            phi = np.arcsin(np.clip(cand[2], -1, 1))
-            theta = np.arctan2(cand[0], cand[1])
-            for th, ph in ((theta, phi), (theta + np.pi, np.pi - phi), (theta + np.pi, -np.pi - phi)):
-                for turn in (-2 * np.pi, 0.0, 2 * np.pi):
-                    pan = CENTER_US[0] + (th + turn) * p["k_pan"]
-                    tilt = CENTER_US[1] + (ph - p["tilt0"]) * p["k_tilt"]
-                    # sanity check: does it really map back to the target?
-                    back = self.predict_pixel(pan, tilt)[0]
-                    miss = np.hypot(back[0] - x, back[1] - y)
-                    outside = (max(0, PAN_US[0] - pan, pan - PAN_US[1])
-                               + max(0, TILT_US[0] - tilt, tilt - TILT_US[1]))
-                    score = (not np.isfinite(miss) or miss > 2, outside)
-                    if best is None or score < best[0]:
-                        best = (score, pan, tilt)
-        (bad_fit, outside), pan, tilt = best
-        if bad_fit:
+        for i in starts:
+            sol = least_squares(lambda q: self.predict_pixel(q[0], q[1])[0] - target, P[i],
+                                method="lm", max_nfev=60)
+            pan, tilt = sol.x
+            back = self.predict_pixel(pan, tilt)[0]
+            miss = np.hypot(*(back - target))
+            outside = (max(0, PAN_US[0] - pan, pan - PAN_US[1])
+                       + max(0, TILT_US[0] - tilt, tilt - TILT_US[1]))
+            # Exact (<2 px) beats close; inside the limits beats outside; then closest.
+            # Right under the pivot pan barely moves the dot, so "close" is accepted.
+            score = (not np.isfinite(miss) or miss > 2, outside, miss if np.isfinite(miss) else 1e9)
+            if best is None or score < best[0]:
+                best = (score, pan, tilt)
+        if best is None:
+            return None
+        (_, outside, miss), pan, tilt = best
+        if miss > REACH_TOLERANCE_PX:
             return None
         if outside > 0:
-            # Just past a limit? Near straight-down, pan hardly moves the dot, so the
-            # clamped position may still land on the target.
+            # Just past a limit? The clamped position may still land on the target.
             cp = min(max(pan, PAN_US[0]), PAN_US[1])
             ct = min(max(tilt, TILT_US[0]), TILT_US[1])
             back = self.predict_pixel(cp, ct)[0]
@@ -296,24 +345,34 @@ class Aimer:
                 return cp, ct
         return pan, tilt
 
-    def reachable(self, x, y):
-        pulses = self.pulses_for(x, y)
-        if pulses is None:
-            return False
-        pan, tilt = pulses
-        return PAN_US[0] <= pan <= PAN_US[1] and TILT_US[0] <= tilt <= TILT_US[1]
+    def _reach_mask(self):
+        """Image of everywhere the dot can land, built FORWARD from a dense sweep of
+        every allowed servo position (so it can't miss reachable spots). 1/4 scale."""
+        if getattr(self, "_reach", None) is None:
+            width, height = self.frame_size
+            pans = np.linspace(*PAN_US, 220)
+            tilts = np.linspace(*TILT_US, 160)
+            P = np.array([(a, b) for b in tilts for a in pans])
+            X = self.predict_pixel(P[:, 0], P[:, 1]) / 4
+            mask = np.zeros((height // 4 + 1, width // 4 + 1), np.uint8)
+            ok = (np.all(np.isfinite(X), axis=1) & (X[:, 0] >= 0) & (X[:, 1] >= 0)
+                  & (X[:, 0] < mask.shape[1]) & (X[:, 1] < mask.shape[0]))
+            r = max(1, int(round(REACH_TOLERANCE_PX / 4)))
+            for px, py in X[ok].astype(int):
+                cv2.circle(mask, (int(px), int(py)), r, 255, -1)
+            self._reach = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        return self._reach
 
-    def reach_outline(self, step=20):
-        """Outlines (a list of (N, 2) pixel arrays) of the area the laser can reach,
-        found by running reachable() over a grid of the camera view. Built this way
-        it always matches what point_at accepts, whatever the mount's geometry
-        (tracing the servo-limit edge breaks when the beam passes straight down)."""
-        width, height = self.frame_size
-        xs, ys = np.arange(step / 2, width, step), np.arange(step / 2, height, step)
-        mask = np.array([[self.reachable(x, y) for x in xs] for y in ys], np.uint8) * 255
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        # grid cell (i, j) -> pixel at its center
-        return [c.reshape(-1, 2) * step + step / 2 for c in contours if len(c) >= 3]
+    def reachable(self, x, y):
+        """True if some allowed servo position puts the dot at pixel (x, y)."""
+        mask = self._reach_mask()
+        i, j = int(y // 4), int(x // 4)
+        return 0 <= i < mask.shape[0] and 0 <= j < mask.shape[1] and bool(mask[i, j])
+
+    def reach_outline(self):
+        """Outlines (list of (N, 2) pixel arrays) of the reachable area, for drawing."""
+        contours, _ = cv2.findContours(self._reach_mask(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return [c.reshape(-1, 2) * 4 + 2 for c in contours if len(c) >= 3]
 
     # ---------------- aiming ----------------
 
@@ -341,6 +400,8 @@ class Aimer:
         for attempt in range(1, (VERIFY_TRIES if reference is not None else 1) + 1):
             pulses = self.pulses_for(aim_x, aim_y)
             if pulses is None:
+                if attempt == 1:
+                    result["out_of_reach"] = True
                 break
             pan, tilt = (int(round(v)) for v in pulses)
             pan, tilt = min(max(pan, PAN_US[0]), PAN_US[1]), min(max(tilt, TILT_US[0]), TILT_US[1])
@@ -431,6 +492,7 @@ class Aimer:
             return False
         self.params = data["params"]
         self.frame_size = tuple(data["frame_size"])
+        self._lut = self._reach = None
         self.rms_px = data.get("rms_px")
         self.samples = [tuple(row) for row in data.get("samples", [])]
         log.info("Loaded calibration from %s (%s)", self.calibration_file, data.get("saved_at"))

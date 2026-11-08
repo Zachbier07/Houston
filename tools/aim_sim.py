@@ -59,6 +59,8 @@ class World:
         self.k_tilt = (1856 / 180) * rng.uniform(0.93, 1.07)
         self.tilt0 = rng.uniform(-60, -40)                               # beam points down and forward
         self.beam_offset = np.array([0.015, 0, 0])                       # beam 1.5 cm to the side of the pivot
+        self.beta = np.radians(rng.uniform(-4, 4))                       # laser a few degrees off perpendicular
+        self.alpha = np.radians(rng.uniform(-6, 6))                      # tilt axis a few degrees off square
         # camera: 0.75 m up, behind the laser, looking down at the table
         self.cam = np.array([0.0, -0.45, 0.75])
         self.cam_R = look_at(self.cam, np.array([0.0, 0.2, 0.0]))       # world -> camera
@@ -67,8 +69,8 @@ class World:
 
     def dot_world(self, pan, tilt):
         theta = np.radians((pan - aim.CENTER_US[0]) / self.k_pan)
-        phi = np.radians((tilt - aim.CENTER_US[1]) / self.k_tilt + self.tilt0)
-        d_local = np.array([np.cos(phi) * np.sin(theta), np.cos(phi) * np.cos(theta), np.sin(phi)])
+        d_local = aim._direction(pan, tilt, self.k_pan * 180 / np.pi, self.k_tilt * 180 / np.pi,
+                                 np.radians(self.tilt0), self.beta, self.alpha).reshape(3)
         start = self.pivot + self.mount @ (rot("z", np.degrees(-theta)) @ self.beam_offset)
         d = self.mount @ d_local
         if d[2] >= -1e-6:
