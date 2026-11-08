@@ -13,6 +13,24 @@ ARM_SECONDS = 8
 MODEL_NAME = "vosk-model-small-en-us-0.15"
 MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", MODEL_NAME)
 
+# Speech recognition, two stages (tested on noisy spoken commands: Vosk small alone
+# had 14% word errors and took ~1.1 s; Whisper base.en had 0% in ~0.45 s):
+#   1. Vosk listens all the time, restricted to the wake word, so "Houston" is
+#      recognized reliably and cheaply, and it marks where each utterance ends.
+#   2. The audio of an utterance containing the wake word (or the next one after a
+#      bare "Houston") is transcribed by Whisper for the actual request.
+SAMPLE_RATE = 16000              # what both recognizers want; PipeWire resamples the mic
+WAKE_GRAMMAR = ["houston", "hey houston", "okay houston", "hi houston", "[unk]"]
+WHISPER_MODEL = os.environ.get("HOUSTON_WHISPER_MODEL", "base.en")
+WHISPER_HINT = ("Houston, find the soldering iron, multimeter, breadboard, Red Bull, Monster, "
+                "needle nose pliers, resistor kit, wire strippers, jumper wire, red probe.")
+WAKE_SPELLINGS = re.compile(r"\b(?:huston|hueston|houstin|houstan|hughston|hewston|euston)\b",
+                            re.IGNORECASE)
+MAX_UTTERANCE_S = 10             # stop recording a request after this long
+PREROLL_S = 2.0                  # audio kept from before the wake word was recognized
+END_SILENCE_S = 0.8              # this much quiet after speech = you're done talking
+QUIET_FACTOR = 2.5               # "quiet" = below this x the room's background level
+
 # These patterns turn normal spoken requests into a compact object-name phrase.
 COMMAND_PREFIXES = (
     r"^(?:please\s+)?(?:can you|could you|would you)\s+",
@@ -143,12 +161,42 @@ class VoiceListener:
 
             SetLogLevel(-1)
             model = Model(MODEL_PATH)
+            from faster_whisper import WhisperModel
+            import numpy as np
+            whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
             device_index = self.device_index
             device = sd.query_devices(device_index, "input")
-            sample_rate = int(device["default_samplerate"])
-            recognizer = KaldiRecognizer(model, sample_rate)
-            audio_queue = queue.Queue(maxsize=32)
+            # 16 kHz: a third of the data of 48 kHz, so the mic doesn't overflow when
+            # the app is busy. Fall back to the device's own rate if it refuses.
+            sample_rate = SAMPLE_RATE
+            try:
+                sd.check_input_settings(device=device_index, samplerate=SAMPLE_RATE, channels=1,
+                                        dtype="int16")
+            except Exception:
+                sample_rate = int(device["default_samplerate"])
+            recognizer = KaldiRecognizer(model, sample_rate, json.dumps(WAKE_GRAMMAR))
+            audio_queue = queue.Queue(maxsize=200)      # ~20 s of audio: transcribing never drops any
+            chunk_s = 0.1
             armed_until = 0.0
+            debug = os.environ.get("HOUSTON_VOICE_DEBUG") == "1"
+            recent = []                                  # rolling pre-roll audio
+            levels = []                                  # rolling loudness while idle -> room level
+            capture = None                               # list of chunks while recording a request
+            quiet_run = 0
+            heard_speech = False
+
+            def transcribe(chunks):
+                pcm = np.frombuffer(b"".join(chunks), "<i2").astype(np.float32) / 32768
+                if sample_rate != SAMPLE_RATE:           # Whisper needs 16 kHz
+                    n = int(len(pcm) * SAMPLE_RATE / sample_rate)
+                    pcm = np.interp(np.linspace(0, len(pcm) - 1, n), np.arange(len(pcm)), pcm)
+                started = time.monotonic()
+                segments, _ = whisper.transcribe(pcm.astype(np.float32), language="en", beam_size=1,
+                                                 initial_prompt=WHISPER_HINT, vad_filter=False)
+                text = " ".join(seg.text for seg in segments).strip()
+                if debug:
+                    print(f"Whisper heard ({time.monotonic() - started:.2f} s): {text}", flush=True)
+                return text
 
             def on_audio(indata, frames, timing, status):
                 if status:
@@ -156,53 +204,87 @@ class VoiceListener:
                 try:
                     audio_queue.put_nowait(bytes(indata))
                 except queue.Full:
-                    # Keep the recognizer near real time instead of building latency.
-                    try:
-                        audio_queue.get_nowait()
-                        audio_queue.put_nowait(bytes(indata))
-                    except queue.Empty:
-                        pass
+                    pass
+
+            def handle(transcript, from_wake):
+                """Same routing as before, on Whisper's text."""
+                nonlocal armed_until
+                # Whisper double-checks Vosk's wake word: Vosk's quick guesses sometimes
+                # "hear" Houston in ordinary talk. Accept close spellings, ignore the rest.
+                transcript = WAKE_SPELLINGS.sub("Houston", transcript)
+                wake_seen, target = command_after_wake_word(transcript)
+                if from_wake and not wake_seen:
+                    if debug:
+                        print(f"Ignored (no wake word in what Whisper heard): {transcript}", flush=True)
+                    return
+                if wake_seen:
+                    if self._is_greeting(target):
+                        self._greet()
+                        armed_until = 0.0
+                    elif target:
+                        self._handle_request(target, transcript)
+                        armed_until = 0.0
+                    else:
+                        armed_until = time.monotonic() + ARM_SECONDS
+                        self._greet("Houston heard; I'm listening")
+                else:
+                    if (time.monotonic() < self.ignore_reply_until
+                            and self._is_greeting(transcript)):
+                        return
+                    if self._is_greeting(transcript):
+                        self._greet()
+                    else:
+                        self._handle_request(transcript, transcript)
+                    armed_until = 0.0
 
             self.on_status("Listening for 'Houston' (offline mic recognition)")
-            print(f"Voice listener active on microphone '{device['name']}' "
-                  f"at {sample_rate} Hz. Set HOUSTON_VOICE_DEBUG=1 to see transcripts.",
-                  flush=True)
-            with sd.RawInputStream(samplerate=sample_rate, blocksize=4000,
+            print(f"Voice listener active on microphone '{device['name']}' at {sample_rate} Hz "
+                  f"(wake word: Vosk, requests: Whisper {WHISPER_MODEL}).", flush=True)
+            with sd.RawInputStream(samplerate=sample_rate, blocksize=int(sample_rate * chunk_s),
                                    device=device_index, dtype="int16", channels=1,
-                                   callback=on_audio):
+                                   latency="high", callback=on_audio):
                 while not self.stop_event.is_set():
                     try:
                         audio = audio_queue.get(timeout=0.25)
                     except queue.Empty:
                         continue
+                    level = float(np.sqrt(np.mean(np.frombuffer(audio, "<i2").astype(np.float32) ** 2)))
+                    room = float(np.median(levels)) if levels else 300.0
+                    quiet = level < max(QUIET_FACTOR * room, 150.0)
+
+                    if capture is not None:
+                        # Recording a request: until enough quiet after speech, or too long.
+                        capture.append(audio)
+                        heard_speech = heard_speech or not quiet
+                        quiet_run = quiet_run + 1 if quiet else 0
+                        too_long = len(capture) * chunk_s > MAX_UTTERANCE_S
+                        if (heard_speech and quiet_run * chunk_s >= END_SILENCE_S) or too_long:
+                            chunks, capture, from_wake = capture, None, capture_from_wake
+                            recognizer.Reset()
+                            recent = []
+                            transcript = transcribe(chunks)
+                            if transcript:
+                                handle(transcript, from_wake)
+                        continue
+
+                    # Idle: track the room level, keep a pre-roll, and spot the wake word.
+                    recent = (recent + [audio])[-int(PREROLL_S / chunk_s):]
+                    levels = (levels + [level])[-int(5 / chunk_s):]
+                    armed = time.monotonic() < armed_until
+                    woke = False
                     if recognizer.AcceptWaveform(audio):
-                        transcript = json.loads(recognizer.Result()).get("text", "").strip()
-                        if not transcript:
-                            continue
-                        if os.environ.get("HOUSTON_VOICE_DEBUG") == "1":
-                            print(f"Vosk heard: {transcript}", flush=True)
-                        wake_seen, target = command_after_wake_word(transcript)
-                        if wake_seen:
-                            if self._is_greeting(target):
-                                self._greet()
-                                armed_until = 0.0
-                            elif target:
-                                self._handle_request(target, transcript)
-                                armed_until = 0.0
-                            else:
-                                armed_until = time.monotonic() + ARM_SECONDS
-                                self._greet("Houston heard; I'm listening")
-                        elif time.monotonic() < armed_until:
-                            if (time.monotonic() < self.ignore_reply_until
-                                    and self._is_greeting(transcript)):
-                                continue
-                            if self._is_greeting(transcript):
-                                self._greet()
-                            else:
-                                self._handle_request(transcript, transcript)
-                            armed_until = 0.0
-                        elif time.monotonic() >= armed_until:
-                            self.on_status("Listening for 'Houston' (offline mic recognition)")
+                        woke = "houston" in json.loads(recognizer.Result()).get("text", "")
+                    else:
+                        woke = "houston" in json.loads(recognizer.PartialResult()).get("partial", "")
+                    if woke or (armed and not quiet):
+                        if debug:
+                            print("Wake word heard; recording request" if woke
+                                  else "Listening after 'Houston'", flush=True)
+                        capture = list(recent) if woke else list(recent[-5:])
+                        capture_from_wake = woke
+                        heard_speech, quiet_run = True, 0
+                        if woke:
+                            recognizer.Reset()
         except Exception as exc:
             message = f"Voice input unavailable: {exc}"
             print(message, file=sys.stderr, flush=True)

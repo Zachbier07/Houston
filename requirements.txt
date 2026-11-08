@@ -5,3 +5,4 @@ vosk>=0.3.45
 sounddevice>=0.5.1
 pyserial>=3.5
 scipy>=1.11
+faster-whisper>=1.0
