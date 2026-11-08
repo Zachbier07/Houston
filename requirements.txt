@@ -3,3 +3,5 @@ Pillow>=10.0
 google-genai>=1.0
 vosk>=0.3.45
 sounddevice>=0.5.1
+pyserial>=3.5
+scipy>=1.11

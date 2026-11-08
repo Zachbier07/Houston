@@ -26,6 +26,10 @@ def main():
         description="Capture a webcam image and list objects with Gemini.")
     parser.add_argument("--camera", type=int, default=0,
                         help="webcam index to open first")
+    parser.add_argument("--port", default=None,
+                        help="Arduino serial port (default: auto-detect)")
+    parser.add_argument("--no-laser", action="store_true",
+                        help="don't look for the Arduino")
     args = parser.parse_args()
 
     try:
@@ -59,7 +63,19 @@ def main():
 
     state = AnalysisState()
     analyzer = GeminiAnalyzer(create_client(api_key, genai, types), Image, types, state)
-    app = CameraApp(cv2, camera, camera_index, analyzer, state)
+    aimer = None
+    if not args.no_laser:
+        from app.serial_link import SerialLink
+        from app.aim import Aimer
+        link = SerialLink(args.port)
+        if link.connected():
+            aimer = Aimer(link)
+            print("Laser ready." + ("" if aimer.calibrated() else " Press K to calibrate."))
+        else:
+            link.close()
+            print("No Arduino found: running without the laser.")
+
+    app = CameraApp(cv2, camera, camera_index, analyzer, state, aimer=aimer)
     voice_listener = VoiceListener(app.handle_voice_command, state.set_notice)
     app.voice_listener = voice_listener
     try:
