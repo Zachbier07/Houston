@@ -144,8 +144,12 @@ class LaserController:
         if result["out_of_reach"]:
             self._say(f"{label} is outside the laser's reach (outside the blue outline).")
         elif result["ok"]:
-            pan, tilt = result["pulses"]
-            self.message = f"Laser on {label} (pan {pan}, tilt {tilt})."
+            if result.get("verified"):
+                tries = result["tries"]
+                self.message = (f"Laser on {label}: camera confirms {result['error_px']:.0f} px off"
+                                f"{f' after {tries} corrections' if tries > 1 else ''}.")
+            else:
+                self.message = f"Laser on {label} (camera couldn't confirm the dot; using the model's aim)."
             print(self.message, flush=True)
         else:
             self._say(f"Laser couldn't aim at {label}: {result.get('reply')}")

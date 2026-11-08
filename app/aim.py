@@ -35,6 +35,7 @@ import logging
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 from scipy.optimize import least_squares
 
@@ -55,6 +56,19 @@ CORRECTION_RIDGE = 0.001        # how hard the correction is pulled toward "no c
                                 # (tested in tools/aim_sim.py: lower overfits sloppy clicks)
 MIN_CAL_POINTS = 6              # the model has 11 numbers; 6 clicks is the bare minimum
 US_PER_RAD = 1856 / np.pi       # Servo library: 544..2400 us = 0..180 degrees (starting guess)
+
+# Camera check after aiming (only if the app gives us camera frames).
+# The laser can't turn off, so: park it far from the target, grab a reference
+# frame, aim, grab another, and look for the dot ONLY near the target.
+VERIFY = True
+SETTLE_S = 0.6                  # servo travel + camera delay before grabbing a frame
+SEARCH_RADIUS_PX = 70           # look for the dot this far around the target
+PARK_MIN_DIST_PX = 250          # the parked dot must be at least this far from the target
+DOT_MIN_JUMP = 45               # summed B+G+R brightness jump the dot must make
+DOT_MAX_AREA_PX = 400           # bigger blobs are a hand / shadow / lighting change
+VERIFY_TRIES = 3
+HIT_TOLERANCE_PX = 6
+CORRECTION_GAIN = 0.9
 
 CALIBRATION_FILE = Path(__file__).resolve().parent.parent / "data" / "aim_calibration.json"
 # ================================================================
@@ -94,8 +108,9 @@ def _poly(x, y):
 
 
 class Aimer:
-    def __init__(self, link, calibration_file=CALIBRATION_FILE):
+    def __init__(self, link, calibration_file=CALIBRATION_FILE, get_frame=None):
         self.link = link
+        self.get_frame = get_frame   # latest RAW camera frame, or None = no camera check
         self.calibration_file = Path(calibration_file)
         self.params = None       # k_pan, k_tilt, tilt0, H (3x3), correction
         self.frame_size = None
@@ -264,14 +279,69 @@ class Aimer:
     # ---------------- aiming ----------------
 
     def point_at(self, x, y):
-        """Aim at pixel (x, y). Returns {"ok": bool, "out_of_reach": bool, "pulses": (pan, tilt) or None}."""
+        """Aim at pixel (x, y), then (if we have camera frames) check where the dot
+        really is and correct. Returns a dict:
+            ok            the Uno accepted the move
+            out_of_reach  no servo position can reach (x, y)
+            pulses        (pan, tilt) sent last
+            verified      the camera saw the dot near the target
+            error_px      distance from the seen dot to the target (if verified)
+            tries         camera-corrected attempts used
+        """
         if not self.calibrated():
             raise RuntimeError("Not calibrated. Press K first.")
         if not self.reachable(x, y):
-            return {"ok": False, "out_of_reach": True, "pulses": None}
-        pan, tilt = (int(round(v)) for v in self.pulses_for(x, y))
-        reply = self.move_to(pan, tilt)
-        return {"ok": reply == "OK", "out_of_reach": False, "pulses": (pan, tilt), "reply": reply}
+            return {"ok": False, "out_of_reach": True, "pulses": None, "verified": False}
+
+        check = VERIFY and self.get_frame is not None
+        reference = self._park_and_grab(x, y) if check else None
+
+        aim_x, aim_y = float(x), float(y)
+        result = {"ok": False, "out_of_reach": False, "pulses": None, "verified": False,
+                  "error_px": None, "tries": 0}
+        for attempt in range(1, (VERIFY_TRIES if reference is not None else 1) + 1):
+            pulses = self.pulses_for(aim_x, aim_y)
+            if pulses is None:
+                break
+            pan, tilt = (int(round(v)) for v in pulses)
+            pan, tilt = min(max(pan, PAN_US[0]), PAN_US[1]), min(max(tilt, TILT_US[0]), TILT_US[1])
+            reply = self.move_to(pan, tilt)
+            result.update(ok=reply == "OK", pulses=(pan, tilt), reply=reply, tries=attempt)
+            if reference is None:
+                break
+            time.sleep(SETTLE_S)
+            frame = self.get_frame()
+            dot = None if frame is None else find_dot_near(reference, frame, x, y)
+            if dot is None:
+                log.info("Camera check: no confident dot near the target (try %d)", attempt)
+                break   # keep the model's aim; never worse than without the check
+            dx, dy = x - dot[0], y - dot[1]
+            error = float(np.hypot(dx, dy))
+            result.update(verified=True, error_px=error, dot=dot)
+            log.info("Camera check try %d: dot at (%.0f, %.0f), %.1f px off", attempt, dot[0], dot[1], error)
+            if error <= HIT_TOLERANCE_PX:
+                break
+            aim_x += CORRECTION_GAIN * dx
+            aim_y += CORRECTION_GAIN * dy
+        return result
+
+    def _park_and_grab(self, x, y):
+        """Move the dot far from (x, y) and grab a reference frame of the target area
+        without the dot in it. Returns the frame, or None if there's no safe spot."""
+        corners = [(PAN_US[a], TILT_US[b]) for a in (0, 1) for b in (0, 1)]
+        candidates = corners + [((PAN_US[0] + PAN_US[1]) // 2, t) for t in TILT_US]
+        best = None
+        for pan, tilt in candidates:
+            px = self.predict_pixel(pan, tilt)[0]
+            dist = np.hypot(px[0] - x, px[1] - y) if np.all(np.isfinite(px)) else 1e9
+            if best is None or dist > best[0]:
+                best = (dist, pan, tilt)
+        if best is None or best[0] < PARK_MIN_DIST_PX:
+            return None
+        self.move_to(best[1], best[2])
+        time.sleep(SETTLE_S)
+        frame = self.get_frame()
+        return None if frame is None else frame.copy()
 
     # ---------------- save / load ----------------
 
@@ -298,3 +368,43 @@ class Aimer:
         self.samples = [tuple(row) for row in data.get("samples", [])]
         log.info("Loaded calibration from %s (%s)", self.calibration_file, data.get("saved_at"))
         return True
+
+
+def find_dot_near(reference, frame, x, y, radius=SEARCH_RADIUS_PX):
+    """Find the laser dot within `radius` px of (x, y): the spot that got much
+    brighter and redder between `reference` (laser parked elsewhere) and `frame`.
+    Returns (x, y) in frame pixels, or None if there's no confident single dot."""
+    h, w = frame.shape[:2]
+    x0, x1 = int(max(x - radius, 0)), int(min(x + radius + 1, w))
+    y0, y1 = int(max(y - radius, 0)), int(min(y + radius + 1, h))
+    if x1 - x0 < 5 or y1 - y0 < 5:
+        return None
+    ref = reference[y0:y1, x0:x1]
+    cur = frame[y0:y1, x0:x1]
+    # LED lamps and auto-exposure shift overall brightness between frames.
+    gain = (float(ref.mean()) + 1) / (float(cur.mean()) + 1)
+    if abs(gain - 1) > 0.002:
+        cur = cv2.convertScaleAbs(cur, alpha=gain)
+    b, g, r = cv2.split(cv2.subtract(cur, ref))
+    jump = cv2.GaussianBlur(cv2.add(cv2.add(b, g), r), (5, 5), 0)
+    peak = int(jump.max())
+    noise = float(np.percentile(jump, 90))
+    if peak < DOT_MIN_JUMP or peak < 3 * noise + 15:
+        return None
+    _, mask = cv2.threshold(jump, max(DOT_MIN_JUMP * 0.6, peak * 0.5), 255, cv2.THRESH_BINARY)
+    count, _, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    blobs = [i for i in range(1, count) if 2 <= stats[i, cv2.CC_STAT_AREA] <= DOT_MAX_AREA_PX]
+    if len(blobs) != 1:
+        return None   # nothing, or several candidates: don't guess
+    i = blobs[0]
+    # A red laser adds mostly red. Reject spots that got brighter without getting redder.
+    ys, xs = np.nonzero(mask == 255)
+    sel = [(yy, xx) for yy, xx in zip(ys, xs)
+           if stats[i, cv2.CC_STAT_LEFT] <= xx < stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH]
+           and stats[i, cv2.CC_STAT_TOP] <= yy < stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]]
+    if sel:
+        yy, xx = np.array(sel).T
+        if float(r[yy, xx].mean()) < 0.8 * max(float(g[yy, xx].mean()), float(b[yy, xx].mean())):
+            return None
+    cx, cy = centroids[i]
+    return float(cx + x0), float(cy + y0)

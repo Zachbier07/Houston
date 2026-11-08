@@ -91,6 +91,8 @@ def main():
             print("No Arduino found: running without the laser.")
 
     app = CameraApp(cv2, camera, camera_index, analyzer, state, aimer=aimer)
+    if aimer:
+        aimer.get_frame = lambda: app.raw_frame   # lets the laser check where the dot landed
     app.speaker = speaker
     voice_listener = VoiceListener(
         app.handle_voice_command,

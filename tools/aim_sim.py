@@ -15,9 +15,13 @@ Usage (from the repo root):
     .venv/bin/python tools/aim_sim.py --targets 300 --seed 4 --click-noise 5
 """
 import argparse
+import collections
 import sys
+import threading
+import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -108,6 +112,93 @@ class FakeLink:
         return "OK"
 
 
+class SimCamera:
+    """Renders camera frames: a desk photo plus the laser dot where the servos
+    REALLY are (gear slop included), with camera lag, flicker, noise and glints."""
+
+    def __init__(self, world, link, photo, lag_s=0.12, glint_chance=0.05):
+        self.world, self.link, self.lag_s, self.glint_chance = world, link, lag_s, glint_chance
+        self.desk = cv2.resize(photo, (W, H)).astype(np.float32)
+        self.history = collections.deque(maxlen=400)
+        self.lock = threading.Lock()
+        self.rng = np.random.default_rng(99)
+        orig = link.aim_to
+
+        def aim_to(pan, tilt):        # record when the servos moved, for the lag
+            reply = orig(pan, tilt)
+            with self.lock:
+                self.history.append((time.monotonic(), link.actual))
+            return reply
+        link.aim_to = aim_to
+        self.history.append((0.0, link.actual))
+
+    def get_frame(self):
+        cutoff = time.monotonic() - self.lag_s
+        with self.lock:
+            actual = self.history[0][1]
+            for t, a in self.history:
+                if t <= cutoff:
+                    actual = a
+        frame = self.desk.copy()
+        px = self.world.dot_pixel(*actual)
+        if visible(px):
+            x, y = px
+            x0, x1, y0, y1 = int(max(x - 12, 0)), int(min(x + 13, W)), int(max(y - 12, 0)), int(min(y + 13, H))
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            glow = np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * 2.5 ** 2))
+            frame[y0:y1, x0:x1] += glow[:, :, None] * np.array([40, 40, 200], np.float32)
+        if self.rng.random() < self.glint_chance:         # a reflection flashes somewhere
+            gx, gy = self.rng.integers(20, W - 20), self.rng.integers(20, H - 20)
+            frame[gy - 2:gy + 3, gx - 2:gx + 3] += 150
+        frame += self.rng.integers(-4, 5, frame.shape)
+        frame *= self.rng.uniform(0.97, 1.03)
+        return np.clip(frame, 0, 255).astype(np.uint8)
+
+
+def camera_check_test(seeds, targets, photo_path, click_noise=3.0):
+    """Model-only aim vs model + camera check, on rendered frames."""
+    photo = cv2.imread(photo_path) if photo_path else np.full((H, W, 3), 120, np.uint8)
+    aim.APPROACH_WAIT_S = 0.0
+    aim.SETTLE_S = 0.3
+    results = {False: [], True: []}
+    confirmed = tries = 0
+    for seed in range(1, seeds + 1):
+        rng = np.random.default_rng(seed)
+        world = World(rng)
+        link = FakeLink()
+        cam = SimCamera(world, link, photo)
+        aimer = aim.Aimer(link, calibration_file=ROOT / "data" / "aim_calibration_sim.json")
+        samples = []
+        for pan, tilt in aimer.calibration_grid():
+            aimer.move_to(pan, tilt)
+            px = world.dot_pixel(*link.actual)
+            if visible(px):
+                c = px + rng.uniform(-click_noise, click_noise, 2)
+                samples.append((pan, tilt, c[0], c[1]))
+        aimer.fit(samples, (W, H))
+        picked = 0
+        while picked < targets:
+            x, y = rng.uniform(0, W), rng.uniform(0, H)
+            if not aimer.reachable(x, y):
+                continue
+            picked += 1
+            for check in (False, True):
+                aimer.get_frame = cam.get_frame if check else None
+                r = aimer.point_at(x, y)
+                landed = world.dot_pixel(*link.actual)
+                results[check].append(np.hypot(landed[0] - x, landed[1] - y))
+                if check:
+                    confirmed += r.get("verified", False)
+                    tries += r.get("tries", 0)
+        (ROOT / "data" / "aim_calibration_sim.json").unlink(missing_ok=True)
+    n = len(results[True])
+    for check, name in ((False, "model only"), (True, "model + camera check")):
+        e = np.array(results[check])
+        print(f"  {name:22s} median {np.median(e):4.1f} px   90th {np.percentile(e, 90):5.1f} px   "
+              f"worst {e.max():5.1f} px   within 6 px: {100 * np.mean(e <= 6):3.0f}%")
+    print(f"  camera confirmed the dot on {confirmed}/{n} aims, {tries / n:.1f} moves per aim on average")
+
+
 def visible(px):
     return px is not None and 0 <= px[0] < W and 0 <= px[1] < H
 
@@ -174,7 +265,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seeds", type=int, default=6)
     parser.add_argument("--click-noise", type=float, default=3.0, help="max click error, px")
+    parser.add_argument("--camera-check", action="store_true",
+                        help="test the camera check on rendered frames instead")
+    parser.add_argument("--photo", help="desk photo for --camera-check")
+    parser.add_argument("--targets", type=int, default=15)
     args = parser.parse_args()
+    if args.camera_check:
+        print(f"Camera check on rendered frames: {args.seeds} mounts x {args.targets} targets")
+        camera_check_test(args.seeds, args.targets, args.photo, args.click_noise)
+        return
 
     setups = [("old: no approach, no correction", dict(approach=False, correction=False)),
               ("+ same-side approach", dict(approach=True, correction=False)),
