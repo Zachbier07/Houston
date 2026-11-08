@@ -53,16 +53,6 @@ class AnalysisState:
                 self.error = ""
                 self.busy = False
 
-    def cancel(self, message="Stopped."):
-        """Forget the request in flight: its result will be ignored when it arrives."""
-        with self.lock:
-            self.request_id += 1
-            self.items = []
-            self.steps = []
-            self.message = message
-            self.error = ""
-            self.busy = False
-
     def fail(self, request_id, error):
         with self.lock:
             if self.request_id == request_id:

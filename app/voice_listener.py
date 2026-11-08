@@ -57,15 +57,6 @@ INSTRUCTION_VERBS = {"read", "check", "count", "compare", "identify", "measure",
 FIND_MAX_WORDS = 4   # a bare request this short ("pliers", "the red multimeter") is an object to find
 
 
-STOP_WORDS = re.compile(r"^(?:please\s+)?(?:stop|cancel|shut up|be quiet|quiet|never ?mind|that's enough|enough|"
-                        r"hold on|wait)\b", re.IGNORECASE)
-
-
-def is_stop_request(text):
-    """'stop', 'cancel', 'be quiet', 'never mind'... (said right after 'Houston')."""
-    return bool(STOP_WORDS.match(text.strip(" ,.!?")))
-
-
 def route_request(text):
     """'find' or 'question'. Find only when it clearly is one: search wording
     ("find the pliers", "where are my keys") or a short object name. Everything
@@ -115,8 +106,7 @@ def command_after_wake_word(transcript):
 class VoiceListener:
     """Continuously transcribes microphone speech locally and signals commands."""
 
-    def __init__(self, on_command, on_status, on_greeting=None, on_question=None, on_stop=None):
-        self.on_stop = on_stop
+    def __init__(self, on_command, on_status, on_greeting=None, on_question=None):
         self.on_command = on_command
         self.on_status = on_status
         self.on_greeting = on_greeting
@@ -333,11 +323,6 @@ class VoiceListener:
     def _handle_request(self, text, transcript, log_user=True):
         if log_user:
             self.on_status(f"Heard: {transcript}")
-        if is_stop_request(text):
-            print(f"Stop requested: {transcript}", flush=True)
-            if self.on_stop:
-                self.on_stop()
-            return
         if self._is_object_search(text):
             target = extract_command_target(text)
             if target:
