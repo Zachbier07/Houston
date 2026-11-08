@@ -10,6 +10,23 @@ from urllib.request import Request, urlopen
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 MODEL_ID = "eleven_flash_v2_5"
 OUTPUT_FORMAT = "pcm_24000"
+SAMPLE_RATE = 24000
+
+
+def output_device():
+    """Which sound output to play on. The PortAudio default can be a raw HDMI
+    device that rejects 24 kHz audio; the system sound server (PipeWire/Pulse)
+    converts the rate and follows the desktop's chosen speaker. Override with
+    HOUSTON_AUDIO_OUT=<device name or number>."""
+    import sounddevice as sd
+    override = os.environ.get("HOUSTON_AUDIO_OUT", "").strip()
+    if override:
+        return int(override) if override.isdigit() else override
+    names = [d["name"] for d in sd.query_devices()]
+    for preferred in ("pipewire", "pulse", "default"):
+        if preferred in names:
+            return preferred
+    return None   # PortAudio's default
 
 
 class ElevenLabsSpeaker:
@@ -47,7 +64,7 @@ class ElevenLabsSpeaker:
             samples = np.frombuffer(audio, dtype="<i2")
             if samples.size:
                 with self._lock:
-                    sd.play(samples, samplerate=24000, blocking=True)
+                    sd.play(samples, samplerate=SAMPLE_RATE, blocking=True, device=output_device())
         except HTTPError as exc:
             print(f"ElevenLabs speech error (HTTP {exc.code}). Check the API key and account credits.",
                   file=sys.stderr, flush=True)
