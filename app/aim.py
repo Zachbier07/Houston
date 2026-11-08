@@ -117,6 +117,7 @@ class Aimer:
         self.rms_px = None
         self.samples = []        # every (pan, tilt, x, y) the model was fitted on
         self.last_pulses = None  # where the servos were sent last
+        self.cal_area = None     # ((pan, tilt), (pan, tilt)): two opposite corners to calibrate inside
         self.load()
 
     def move_to(self, pan, tilt):
@@ -130,11 +131,16 @@ class Aimer:
 
     # ---------------- calibration ----------------
 
-    @staticmethod
-    def calibration_grid():
-        """(pan, tilt) pulses to visit, snaking so the servos never jump far."""
-        pans = np.linspace(*PAN_US, CAL_GRID[0]).round().astype(int)
-        tilts = np.linspace(*TILT_US, CAL_GRID[1]).round().astype(int)
+    def calibration_grid(self):
+        """(pan, tilt) pulses to visit, snaking so the servos never jump far.
+        Inside the marked area (cal_area) if there is one, else the full servo range."""
+        if self.cal_area:
+            (p1, t1), (p2, t2) = self.cal_area
+            pan_range, tilt_range = sorted((p1, p2)), sorted((t1, t2))
+        else:
+            pan_range, tilt_range = PAN_US, TILT_US
+        pans = np.linspace(*pan_range, CAL_GRID[0]).round().astype(int)
+        tilts = np.linspace(*tilt_range, CAL_GRID[1]).round().astype(int)
         grid = []
         for row, tilt in enumerate(tilts):
             for pan in (pans if row % 2 == 0 else pans[::-1]):
@@ -353,6 +359,7 @@ class Aimer:
             "rms_px": self.rms_px,
             "samples": self.samples,
             "limits": {"pan_us": PAN_US, "tilt_us": TILT_US},
+            "cal_area": self.cal_area,
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }, indent=2))
 
@@ -360,6 +367,8 @@ class Aimer:
         if not self.calibration_file.exists():
             return False
         data = json.loads(self.calibration_file.read_text())
+        area = data.get("cal_area")
+        self.cal_area = tuple(tuple(c) for c in area) if area else None
         if "params" not in data:   # file from the old dot-finding version
             return False
         self.params = data["params"]

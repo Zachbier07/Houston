@@ -12,7 +12,9 @@ and asks for two things back:
 Features:
   K       calibrate: the laser steps through a grid; click the dot each time
           (S skip, Backspace back, Enter finish early, Esc cancel)
-  M       move mode: A/D mount, W/S laser, [ ] step size, C center, M/Esc done
+  M       move mode: A/D mount, W/S laser, [ ] step size, C center, M/Esc done.
+          In move mode, 1 and 2 mark two opposite corners of the area to
+          calibrate in (so K never sends the dot off camera); 0 clears it.
   click   aim the laser at that spot
   right-click   "the dot really landed here": learn from it and re-aim
 
@@ -92,7 +94,9 @@ class LaserController:
                     f"Backspace: back | Enter: done ({len(cal['samples'])} clicks) | Esc: cancel{reply}")
         if self.move:
             m = self.move
-            return (f"MOVE: A/D mount, W/S laser, [ ] step {m['step']}us, C center, M/Esc done | "
+            corners = ("1 and 2 marked" if m.get("c1") and m.get("c2")
+                       else "1 marked, now 2" if m.get("c1") else "mark corners with 1, 2")
+            return (f"MOVE: A/D mount, W/S laser, [ ] step {m['step']}us, C center | {corners} | M/Esc done | "
                     f"pan {m['pan']} tilt {m['tilt']} | Uno: {m['reply']}")
         return self.message
 
@@ -172,6 +176,8 @@ class LaserController:
         if self.aiming:
             return
         self.cal = {"grid": self.aimer.calibration_grid(), "i": 0, "samples": {}}
+        if self.aimer.cal_area:
+            print(f"Calibrating inside the marked area {self.aimer.cal_area}", flush=True)
         self._cal_move()
 
     def _cal_move(self):
@@ -238,6 +244,17 @@ class LaserController:
         elif k == "c":
             m["pan"], m["tilt"] = CENTER_US
             self._send_move()
+        elif key in ("1", "2"):
+            m["c" + key] = (m["pan"], m["tilt"])
+            if m.get("c1") and m.get("c2"):
+                self.aimer.cal_area = (m["c1"], m["c2"])
+                self._say(f"Calibration area set: pan {m['c1'][0]}-{m['c2'][0]}, tilt {m['c1'][1]}-{m['c2'][1]}. "
+                          "Press M to leave move mode, then K.")
+        elif key == "0":
+            m.pop("c1", None)
+            m.pop("c2", None)
+            self.aimer.cal_area = None
+            self._say("Calibration area cleared: K will sweep the full servo range.")
         elif key == "[":
             m["step"] = max(5, m["step"] // 2)
         elif key == "]":
