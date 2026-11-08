@@ -107,6 +107,7 @@ class VoiceListener:
     """Continuously transcribes microphone speech locally and signals commands."""
 
     def __init__(self, on_command, on_status, on_greeting=None, on_question=None):
+        self.muted = False             # mic button off: audio is ignored (listener keeps running)
         self.on_command = on_command
         self.on_status = on_status
         self.on_greeting = on_greeting
@@ -272,6 +273,11 @@ class VoiceListener:
                     try:
                         audio = audio_queue.get(timeout=0.25)
                     except queue.Empty:
+                        continue
+                    if self.muted:                    # mic turned off: drop audio, forget partials
+                        if capture is not None or recent:
+                            capture, recent = None, []
+                            recognizer.Reset()
                         continue
                     level = float(np.sqrt(np.mean(np.frombuffer(audio, "<i2").astype(np.float32) ** 2)))
                     room = float(np.median(levels)) if levels else 300.0

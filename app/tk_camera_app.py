@@ -190,6 +190,8 @@ class CameraApp:
             side="left")
         ttk.Button(actions, text="Stop", command=self.stop_everything).pack(
             side="left", padx=(8, 0))
+        self.mic_button = ttk.Button(actions, text="Mic: On", command=self.toggle_mic)
+        self.mic_button.pack(side="left", padx=(8, 0))
         ttk.Label(actions, text="Dashed yellow boxes indicate possible matches.",
                   style="Muted.TLabel").pack(side="left", padx=12)
 
@@ -517,6 +519,17 @@ class CameraApp:
     def _change_zoom(self, amount):
         self.zoom.set(max(ZOOM_MIN, min(ZOOM_MAX, self.zoom.get() + amount)))
         self._on_zoom(self.zoom.get())
+
+    def toggle_mic(self):
+        """Turn voice input off or on. Typing in the chat still works with the mic off."""
+        if not self.voice_listener:
+            return
+        self.voice_listener.muted = not self.voice_listener.muted
+        off = self.voice_listener.muted
+        self.mic_button.configure(text="Mic: Off" if off else "Mic: On")
+        self.state.set_notice("Mic off: Houston isn't listening (typing still works)" if off
+                              else "Mic on: listening for 'Houston'")
+        print("Mic off." if off else "Mic on.", flush=True)
 
     def stop_everything(self):
         """Stop talking, stop the pointing tour, and drop an answer still on its way."""
