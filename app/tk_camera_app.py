@@ -404,15 +404,15 @@ class CameraApp:
             answer = message
             with self.state.lock:
                 steps = list(getattr(self.state, "steps", []))
+                spoken = getattr(self.state, "spoken", "")
             if steps:
                 answer += "\n" + "\n".join(f"{i}. {st['label']}: {st['say']}"
                                             for i, st in enumerate(steps, 1))
-                self._start_explanation(message, steps)
+                self._start_explanation(spoken or message.split("\n")[0], steps)
         self._append_chat("Houston", answer)
 
-    def _start_explanation(self, message, steps):
+    def _start_explanation(self, spoken, steps):
         """Speak the answer and point at each step (the laser tour)."""
-        spoken = getattr(self.analyzer, "last_spoken_answer", "") or message.split("\n")[0]
 
         def speak_blocking(text):
             if self.speaker:

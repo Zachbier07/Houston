@@ -247,7 +247,7 @@ class GeminiAnalyzer:
             if not answer:
                 answer = "I don't have an answer for that yet. Please try asking another way."
             shown = answer + (f"\n\n{details}" if details else "")
-            self.state.complete_answer(request_id, shown, steps)
+            self.state.complete_answer(request_id, shown, steps, spoken=answer)
             print(f"Houston: {shown}", flush=True)
             for i, st in enumerate(steps, 1):
                 print(f"  {i}. {st['label']} at {st['center'][0]:.0%}, {st['center'][1]:.0%}: {st['say']}",
@@ -257,7 +257,6 @@ class GeminiAnalyzer:
             # With steps, the app speaks while it points (one step at a time).
             if self.speaker and not steps:
                 self.speaker.speak(answer)
-            self.last_spoken_answer = answer
         except Exception as exc:
             print(f"Question answering error: {exc}", file=sys.stderr, flush=True)
             message = str(exc)

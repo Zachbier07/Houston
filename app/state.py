@@ -12,6 +12,7 @@ class AnalysisState:
     snapshot: object = None
     request_id: int = 0
     steps: list = field(default_factory=list)   # pointing steps of the last answer
+    spoken: str = ""                            # what to say before those steps
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def begin(self, frame):
@@ -40,13 +41,15 @@ class AnalysisState:
                 self.error = ""
                 self.busy = False
 
-    def complete_answer(self, request_id, answer, steps=None):
-        """steps: list of {"label", "say", "center": (x, y) as 0..1 fractions of the frame}."""
+    def complete_answer(self, request_id, answer, steps=None, spoken=""):
+        """steps: list of {"label", "say", "center": (x, y) as 0..1 fractions of the frame}.
+        spoken: the short answer to say out loud before the pointing tour."""
         with self.lock:
             if self.request_id == request_id:
                 self.items = []
                 self.message = answer
                 self.steps = list(steps or [])
+                self.spoken = spoken
                 self.error = ""
                 self.busy = False
 
