@@ -28,9 +28,10 @@ from .aim import CENTER_US, PAN_US, TILT_US
 
 
 class LaserController:
-    def __init__(self, aimer, notify):
+    def __init__(self, aimer, notify, speak=None):
         self.aimer = aimer
         self.notify = notify
+        self.speak = speak             # say something out loud (optional)
         self.frame_size = None         # (width, height) of raw camera frames
         self.cal = None                # dict while calibrating
         self.move = None               # dict while in move mode
@@ -161,6 +162,8 @@ class LaserController:
             label = f"the reachable part of {label}"
         if result["out_of_reach"]:
             self._say(f"{label} is outside the laser's reach (outside the blue outline).")
+            if self.speak:
+                self.speak(f"The {label} is outside my laser's reach.")
         elif result["ok"]:
             if result.get("verified"):
                 tries = result["tries"]

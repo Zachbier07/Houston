@@ -20,6 +20,15 @@ MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 FIND_MODEL = os.environ.get("GEMINI_FIND_MODEL", "gemini-3.5-flash")
 FIND_IMAGE_WIDTH = 640          # boxes come back normalized, so a smaller image is fine
 FIND_THINKING = "low"
+# The person sits across the table from the camera, facing it, so their view is
+# the camera image turned 180 degrees: the camera's right is their left, and the
+# top of the image is the side nearest them. HOUSTON_MIRROR=0 if you sit on the
+# camera's side instead.
+USER_FACES_CAMERA = os.environ.get("HOUSTON_MIRROR", "1") != "0"
+VIEWPOINT_NOTE = ("The person you are talking to sits across the table from the camera, facing it: "
+                  "their left is the right side of the image, and the top of the image is the side "
+                  "nearest them. Describe every position from their point of view.\n"
+                  if USER_FACES_CAMERA else "")
 PROMPT = """
 Analyze the image and list distinct physical objects. Include engineering tools,
 electronic parts, and small items. Include plausible partially visible objects
@@ -55,7 +64,7 @@ Use box_2d coordinates [ymin, xmin, ymax, xmax] on a 0-to-1000 scale. Return []
 if there is no visible evidence for the requested object.
 Requested object name (JSON string): {target}
 """
-QUESTION_PROMPT = """
+QUESTION_PROMPT = VIEWPOINT_NOTE + """
 You are Houston, a concise voice assistant that can see the attached camera image.
 Match the answer's depth to the question. Keep simple questions short. For
 engineering, design, calculation, and troubleshooting problems, give a useful
@@ -230,20 +239,27 @@ class GeminiAnalyzer:
         nearby = item.get("nearby", [])[:2]
         if confidence < 0.75:
             reason = item.get("note") or "partly obscured"
-            statement = f"Possible {item['label']}, {reason}, near the {location}"
+            statement = f"Possible {item['label']}, {reason}, at the {location}"
         else:
-            statement = f"Found {item['label']} near the {location}"
+            statement = f"Found {item['label']} at the {location}"
         if nearby:
             statement += f", beside {cls._join_names(nearby)}"
         return statement + "."
 
     @staticmethod
     def _spoken_location(center):
+        """Where something is, in words, from the person's point of view."""
         x, y = center
+        if USER_FACES_CAMERA:
+            x = 1 - x                  # camera's right is their left
+            near = y < 0.34            # top of the image is nearest them
+            far = y > 0.66
+            vertical = "near" if near else "far" if far else "middle"
+        else:
+            vertical = "far" if y < 0.34 else "near" if y > 0.66 else "middle"
         horizontal = "left" if x < 0.34 else "right" if x > 0.66 else "center"
-        vertical = "upper" if y < 0.34 else "lower" if y > 0.66 else "middle"
         if horizontal == "center":
-            return vertical if vertical != "middle" else "center"
+            return f"{vertical} side" if vertical != "middle" else "center"
         if vertical == "middle":
             return horizontal
         return f"{vertical} {horizontal}"

@@ -49,7 +49,8 @@ class CameraApp:
         self.raw_frame = None          # un-zoomed frame: what laser aiming works in
         self.preview_geom = None       # (scale, image_width, image_height) of the shown preview
         # Laser (None when no Uno is connected). Its messages go into the chat.
-        self.laser = (LaserController(aimer, lambda text: self.ui_events.put(("Houston", text)))
+        self.laser = (LaserController(aimer, lambda text: self.ui_events.put(("Houston", text)),
+                                      speak=lambda text: self.speaker and self.speaker.speak(text))
                       if aimer else None)
         self.laser_status = tk.StringVar(value=self.laser.status() if self.laser
                                          else "Laser: no Arduino connected")
@@ -379,8 +380,7 @@ class CameraApp:
                 x, y = item["center"]
                 certainty = ("Possible" if item.get("confidence", 1.0) < CONFIDENCE_THRESHOLD
                              else "Found")
-                line = (f"{certainty} {item['label']} near {x * 100:.0f}% from the left, "
-                        f"{y * 100:.0f}% from the top")
+                line = f"{certainty} {item['label']} at the {self.analyzer._spoken_location((x, y))}"
                 nearby = item.get("nearby", [])[:2]
                 if nearby:
                     line += f"; beside {', '.join(nearby)}"
