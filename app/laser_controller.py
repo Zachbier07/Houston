@@ -35,6 +35,7 @@ class LaserController:
         self.notify = notify
         self.speak = speak             # say something out loud (optional)
         self.tour = None               # {"steps": [...], "current": i} while explaining with the laser
+        self.stopped = False           # set by stop(): the running tour ends at its next step
         self.frame_size = None         # (width, height) of raw camera frames
         self.cal = None                # dict while calibrating
         self.move = None               # dict while in move mode
@@ -81,6 +82,12 @@ class LaserController:
         else:
             self._job(lambda: self._point(f"({x:.0f}, {y:.0f})", x, y))
 
+    def stop(self):
+        """End a pointing tour (the laser stays where it is; it can't switch off)."""
+        self.stopped = True
+        self.tour = None
+        self.message = "Stopped."
+
     def explain(self, answer, steps, speak_blocking):
         """Pointing tour for an answer: say the answer, then for each step point the
         laser at it and say that step. steps: [{"label", "say", "x", "y"}] in raw
@@ -91,14 +98,21 @@ class LaserController:
             speak_blocking(answer)
             self._say("I could point these out, but the laser isn't calibrated: press K.")
             return
-        self.tour = {"steps": steps, "current": -1}
+        self.tour = tour = {"steps": steps, "current": -1}
+        self.stopped = False
 
         def run():
             speak_blocking(answer)
             for i, st in enumerate(steps):
-                self.tour["current"] = i
-                if st.get("ready") is not None:
-                    st["ready"].wait(timeout=6)        # zoom-in refinement for this step
+                if self.stopped or self.tour is not tour:
+                    return
+                tour["current"] = i
+                if st.get("ready") is not None:        # zoom-in refinement for this step
+                    for _ in range(60):                 # up to 6 s, noticing a stop within 0.1 s
+                        if st["ready"].wait(timeout=0.1) or self.stopped:
+                            break
+                if self.stopped or self.tour is not tour:
+                    return
                 if st.get("resolve"):
                     st["x"], st["y"] = st["resolve"]()
                 # Two different things must not end up on the same spot: if refinement
@@ -122,9 +136,11 @@ class LaserController:
                 say = st["say"] or st["label"]
                 if result["out_of_reach"]:
                     say += " That one is outside my laser's reach."
+                if self.stopped or self.tour is not tour:
+                    return
                 speak_blocking(say)
             self.message = f"Done explaining ({len(steps)} steps)."
-            self.tour["current"] = len(steps)   # keep the markers up, none highlighted
+            tour["current"] = len(steps)   # keep the markers up, none highlighted
 
         self._job(run)
 

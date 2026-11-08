@@ -35,6 +35,16 @@ class ElevenLabsSpeaker:
     def __init__(self, api_key):
         self.api_key = api_key.strip()
         self._lock = threading.Lock()
+        self._generation = 0          # bumped by stop(): anything queued before it stays silent
+
+    def stop(self):
+        """Cut off whatever is playing now and drop anything still being fetched."""
+        self._generation += 1
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception:
+            pass
 
     def speak(self, text):
         """Speak a short phrase in a worker so callers stay responsive."""
@@ -46,6 +56,7 @@ class ElevenLabsSpeaker:
                          name="HoustonSpeechOutput").start()
 
     def _speak(self, text):
+        generation = self._generation
         try:
             import numpy as np
             import sounddevice as sd
@@ -62,7 +73,7 @@ class ElevenLabsSpeaker:
             with urlopen(request, timeout=20) as response:
                 audio = response.read()
             samples = np.frombuffer(audio, dtype="<i2")
-            if samples.size:
+            if samples.size and generation == self._generation:   # not stopped meanwhile
                 with self._lock:
                     sd.play(samples, samplerate=SAMPLE_RATE, blocking=True, device=output_device())
         except HTTPError as exc:

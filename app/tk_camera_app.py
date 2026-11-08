@@ -14,7 +14,7 @@ from PIL import Image, ImageTk
 from .camera_app import ZOOM_MAX, ZOOM_MIN, open_camera
 from .laser_controller import LaserController
 from .vision import CONFIDENCE_THRESHOLD, digital_zoom
-from .voice_listener import VoiceListener, extract_command_target, route_request
+from .voice_listener import VoiceListener, extract_command_target, is_stop_request, route_request
 
 
 class CameraApp:
@@ -188,6 +188,8 @@ class CameraApp:
         actions.pack(fill="x")
         ttk.Button(actions, text="List visible objects", command=self.capture_all).pack(
             side="left")
+        ttk.Button(actions, text="Stop (Esc)", command=self.stop_everything).pack(
+            side="left", padx=(8, 0))
         ttk.Label(actions, text="Dashed yellow boxes indicate possible matches.",
                   style="Muted.TLabel").pack(side="left", padx=12)
 
@@ -196,7 +198,8 @@ class CameraApp:
         self.root.bind("<Down>", lambda _event: self._change_zoom(-0.1))
         self.root.bind("c", lambda event: self._laser_key(event) or self._cycle_camera())
         self.root.bind("C", lambda event: self._laser_key(event) or self._cycle_camera())
-        self.root.bind("<Escape>", lambda event: self._laser_key(event) or self.close())
+        # Esc stops Houston (or leaves calibration / move mode). Close with Quit or the window.
+        self.root.bind("<Escape>", lambda event: self._laser_key(event) or self.stop_everything())
         self.root.bind("<Key>", self._laser_key)
 
     def _laser_key(self, event):
@@ -451,6 +454,10 @@ class CameraApp:
             if self.speaker:
                 self.speaker.speak("Hi!")
             return "break"
+        if is_stop_request(request):
+            self.stop_everything()
+            self._append_chat("Houston", "Stopped.")
+            return "break"
         if VoiceListener._is_greeting(request):
             self._append_chat("Houston", "Hi!")
             if self.speaker:
@@ -515,6 +522,20 @@ class CameraApp:
     def _change_zoom(self, amount):
         self.zoom.set(max(ZOOM_MIN, min(ZOOM_MAX, self.zoom.get() + amount)))
         self._on_zoom(self.zoom.get())
+
+    def stop_everything(self):
+        """Stop talking, stop the pointing tour, and drop an answer still on its way."""
+        self.state.cancel("Stopped.")
+        self.last_logged_request = self.state.request_id   # don't log the cancelled request
+        if self.speaker:
+            self.speaker.stop()
+        if self.laser:
+            self.laser.stop()
+        print("Stopped.", flush=True)
+
+    def handle_voice_stop(self):
+        self.ui_events.put(("You", "Stop."))
+        self.root.after(0, self.stop_everything)          # Tk work belongs on the UI thread
 
     def handle_voice_command(self, target):
         self.ui_events.put(("You", f"Find {target}."))
