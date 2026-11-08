@@ -575,11 +575,9 @@ class CameraApp:
         height, width = view.shape[:2]
         crop_w, crop_h = width / self.zoom, height / self.zoom
         left, top = (width - crop_w) / 2, (height - crop_h) / 2
-        pts = (self.reach_px - [left, top]) * self.zoom
-        if not np.all(np.isfinite(pts)):
-            return
-        poly = np.clip(pts, -10000, 10000).astype(np.int32).reshape(-1, 1, 2)
-        self.cv2.polylines(view, [poly], True, (255, 160, 0), 2, self.cv2.LINE_AA)
+        polys = [np.clip((np.asarray(c, float) - [left, top]) * self.zoom, -10000, 10000)
+                 .astype(np.int32).reshape(-1, 1, 2) for c in self.reach_px]
+        self.cv2.polylines(view, polys, True, (255, 160, 0), 2, self.cv2.LINE_AA)
 
     def _on_laser_mouse(self, event, x, y):
         """Left click: record a calibration point, or aim there.

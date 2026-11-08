@@ -52,6 +52,7 @@ CAL_GRID = (6, 5)               # pan x tilt calibration points (skip the ones y
 APPROACH_US = 40                # come at every position from this far below, to take up gear slop
 APPROACH_WAIT_S = 0.15
 MIN_CORRECTION_SAMPLES = 10     # the smooth correction needs at least this many clicks
+PARTIAL_MARGIN_PX = 15          # partly-reachable object: aim at least this far inside the reach area
 REACH_TOLERANCE_PX = 12         # past a servo limit but the clamped aim lands this close: still reachable
 MAX_FIT_ERROR_PX = 40           # refuse (and keep the old calibration) if the fit is worse than this
 CORRECTION_RIDGE = 0.001        # how hard the correction is pulled toward "no correction"
@@ -302,14 +303,17 @@ class Aimer:
         pan, tilt = pulses
         return PAN_US[0] <= pan <= PAN_US[1] and TILT_US[0] <= tilt <= TILT_US[1]
 
-    def reach_outline(self, steps=40):
-        """Pixels along the edge of what the servos can reach (curved), for drawing."""
-        pans = np.linspace(*PAN_US, steps)
-        tilts = np.linspace(*TILT_US, steps)
-        edge = ([(p, TILT_US[0]) for p in pans] + [(PAN_US[1], t) for t in tilts]
-                + [(p, TILT_US[1]) for p in pans[::-1]] + [(PAN_US[0], t) for t in tilts[::-1]])
-        e = np.array(edge)
-        return self.predict_pixel(e[:, 0], e[:, 1])
+    def reach_outline(self, step=20):
+        """Outlines (a list of (N, 2) pixel arrays) of the area the laser can reach,
+        found by running reachable() over a grid of the camera view. Built this way
+        it always matches what point_at accepts, whatever the mount's geometry
+        (tracing the servo-limit edge breaks when the beam passes straight down)."""
+        width, height = self.frame_size
+        xs, ys = np.arange(step / 2, width, step), np.arange(step / 2, height, step)
+        mask = np.array([[self.reachable(x, y) for x in xs] for y in ys], np.uint8) * 255
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # grid cell (i, j) -> pixel at its center
+        return [c.reshape(-1, 2) * step + step / 2 for c in contours if len(c) >= 3]
 
     # ---------------- aiming ----------------
 
@@ -358,6 +362,31 @@ class Aimer:
                 break
             aim_x += CORRECTION_GAIN * dx
             aim_y += CORRECTION_GAIN * dy
+        return result
+
+    def point_at_box(self, box):
+        """Aim at an object's box (x1, y1, x2, y2, raw pixels): its center if the
+        laser can reach it, otherwise the reachable spot in the box closest to the
+        center. Out of reach only if no part of the box is reachable."""
+        x1, y1, x2, y2 = box
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        if self.reachable(cx, cy):
+            return self.point_at(cx, cy)
+        # 9 x 9 spots across the box, inset a little so we hit the object, not its edge
+        best = None
+        for fx in np.linspace(0.1, 0.9, 9):
+            for fy in np.linspace(0.1, 0.9, 9):
+                x, y = x1 + fx * (x2 - x1), y1 + fy * (y2 - y1)
+                m = PARTIAL_MARGIN_PX   # keep off the very edge of reach, where the servos are at a limit
+                if self.reachable(x, y) and all(self.reachable(x + dx, y + dy)
+                                                for dx, dy in ((m, 0), (-m, 0), (0, m), (0, -m))):
+                    d = np.hypot(x - cx, y - cy)
+                    if best is None or d < best[0]:
+                        best = (d, x, y)
+        if best is None:
+            return {"ok": False, "out_of_reach": True, "pulses": None, "verified": False}
+        result = self.point_at(best[1], best[2])
+        result["partial"] = True     # aimed at the reachable part, not the center
         return result
 
     def _park_and_grab(self, x, y):

@@ -388,9 +388,14 @@ class CameraApp:
                     line += f" ({item['note']})"
                 lines.append(line)
             answer = "\n".join(lines)
-            if self.laser and self.raw_frame is not None:
+            if self.laser and self.raw_frame is not None and self.latest_frame is not None:
                 raw_x, raw_y = self._view_to_raw(*items[0]["center"])
-                self.laser.point_at_item(items[0]["label"], raw_x, raw_y)
+                # the box is in pixels of the (zoomed) view; convert its corners to raw
+                vh, vw = self.latest_frame.shape[:2]
+                x1, y1, x2, y2 = items[0]["box"]
+                bx1, by1 = self._view_to_raw(x1 / vw, y1 / vh)
+                bx2, by2 = self._view_to_raw(x2 / vw, y2 / vh)
+                self.laser.point_at_item(items[0]["label"], raw_x, raw_y, box=(bx1, by1, bx2, by2))
         elif snapshot is not None and message == "Found 0 objects":
             answer = "I couldn't find a clear match in that image."
         else:

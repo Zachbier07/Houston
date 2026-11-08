@@ -36,7 +36,9 @@ class LaserController:
         self.move = None               # dict while in move mode
         self.aiming = False
         self.last_target = None        # (label, x, y) last aimed at
-        self.reach_px = aimer.reach_outline() if aimer.calibrated() else None
+        self.reach_px = None           # list of outlines of the reachable area, raw pixels
+        if aimer.calibrated():
+            self._refresh_reach()
         self.message = "Laser ready." if aimer.calibrated() else "Laser not calibrated: press K."
 
     def active(self):
@@ -75,14 +77,25 @@ class LaserController:
         else:
             self._job(lambda: self._point(f"({x:.0f}, {y:.0f})", x, y))
 
-    def point_at_item(self, label, x, y):
-        """A find finished: point at it (if calibrated and not busy)."""
+    def point_at_item(self, label, x, y, box=None):
+        """A find finished: point at it (if calibrated and not busy). With the object's
+        box (raw pixels), a partly reachable object gets pointed at its reachable part."""
         if self.active():
             return
         if not self.aimer.calibrated():
             self._say(f"Found {label}, but the laser isn't calibrated: press K.")
             return
-        self._job(lambda: self._point(label, x, y))
+        self._job(lambda: self._point(label, x, y, box))
+
+    def _refresh_reach(self):
+        """Rebuild the reach outline in the background (takes ~0.5 s)."""
+        def work():
+            if self.frame_size is None and self.aimer.frame_size is None:
+                return
+            if self.aimer.frame_size is None:
+                self.aimer.frame_size = self.frame_size
+            self.reach_px = self.aimer.reach_outline()
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------------- output ----------------
 
@@ -113,11 +126,10 @@ class LaserController:
             for px, py in self.cal["samples"].values():
                 vx, vy = to_view([(px, py)])[0]
                 cv2.circle(view, (int(vx), int(vy)), 6, (0, 220, 0), 2)
-        elif self.reach_px is not None:
-            pts = to_view(self.reach_px)
-            if np.all(np.isfinite(pts)):
-                poly = np.clip(pts, -10000, 10000).astype(np.int32).reshape(-1, 1, 2)
-                cv2.polylines(view, [poly], True, (255, 160, 0), 2, cv2.LINE_AA)
+        elif self.reach_px:
+            polys = [np.clip(to_view(c), -10000, 10000).astype(np.int32).reshape(-1, 1, 2)
+                     for c in self.reach_px]
+            cv2.polylines(view, polys, True, (255, 160, 0), 2, cv2.LINE_AA)
 
     # ---------------- aiming ----------------
 
@@ -142,9 +154,11 @@ class LaserController:
 
         threading.Thread(target=wrapper, daemon=True).start()
 
-    def _point(self, label, x, y):
+    def _point(self, label, x, y, box=None):
         self.last_target = (label, x, y)
-        result = self.aimer.point_at(x, y)
+        result = self.aimer.point_at_box(box) if box else self.aimer.point_at(x, y)
+        if result.get("partial"):
+            label = f"the reachable part of {label}"
         if result["out_of_reach"]:
             self._say(f"{label} is outside the laser's reach (outside the blue outline).")
         elif result["ok"]:
@@ -163,7 +177,7 @@ class LaserController:
             self._say("Aim somewhere first, then right-click where the dot really is.")
             return
         summary = self.aimer.add_sample(*self.aimer.last_pulses, x, y)
-        self.reach_px = self.aimer.reach_outline()
+        self._refresh_reach()
         print(f"Learned from correction: {summary}", flush=True)
         if self.last_target:
             label, tx, ty = self.last_target
@@ -212,7 +226,7 @@ class LaserController:
         samples = [(*cal["grid"][i], px, py) for i, (px, py) in sorted(cal["samples"].items())]
         try:
             summary = self.aimer.fit(samples, self.frame_size)
-            self.reach_px = self.aimer.reach_outline()
+            self._refresh_reach()
             self._say(summary + " Click anywhere to test.")
         except Exception as exc:
             self._say(f"Calibration failed: {exc}")
